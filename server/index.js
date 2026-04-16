@@ -906,7 +906,7 @@ app.post('/api/telegram/set-webhook', requireAuth, requireRole('directeur'), asy
   const { url } = req.body
   if (!url) return res.status(400).json({ error: 'URL requise' })
   try {
-    const r = await fetch(`https://api.telegram.org/bot8365732100:AAHhqqnayRjBSQMIpyy3YHxZh6fYnMPexI0/setWebhook`, {
+    const r = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN || '8365732100:AAHhqqnayRjBSQMIpyy3YHxZh6fYnMPexI0'}/setWebhook`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: `${url}/api/telegram/webhook` })
@@ -985,24 +985,13 @@ if (IS_PROD) {
 
 // ─── DÉMARRAGE ────────────────────────────────────────────────────────────────
 
-// Servir le build React en production (Railway)
-const DIST = path.join(__dirname, '../dist')
-if (existsSync(join(DIST, 'index.html'))) {
-  app.use(express.static(DIST))
-  app.get(/^(?!\/api).*/, (req, res) => {
-    res.sendFile(join(DIST, 'index.html'))
-  })
-  console.log('[CAL Smart] Mode production — React servi depuis /dist')
-}
-
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => {
-  console.log(`\n🏠 CAL Smart — Serveur démarré`)
-  console.log(`   API  → http://localhost:${PORT}/api`)
-  console.log(`   App  → http://localhost:3000`)
+  console.log(`\n✅ CAL Smart v2.0 — Serveur démarré`)
+  console.log(`   Port → ${PORT}`)
   console.log(`   Bot  → @CALSmartSaintDenis_bot\n`)
 
-  // Démarrer le scheduler
+  // Démarrer le scheduler digest hebdo
   schedulerDigest()
   // Vérifier urgences toutes les 24h
   setInterval(checkUrgences, 24 * 60 * 60 * 1000)

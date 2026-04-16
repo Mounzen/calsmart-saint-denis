@@ -1,0 +1,40 @@
+{
+  "elus": [
+    {"id":"E1","nom":"M. Dupont","prenom":"André","secteur":"Nord","quartiers":["Floréal","La Courneuve"]},
+    {"id":"E2","nom":"Mme Leclerc","prenom":"Sophie","secteur":"Centre","quartiers":["Centre-ville","Mutualité"]},
+    {"id":"E3","nom":"M. Traoré","prenom":"Moussa","secteur":"Ouest","quartiers":["Franc-Moisin","Allende"]},
+    {"id":"E4","nom":"Mme Sow","prenom":"Kadiatou","secteur":"Est","quartiers":["Cosmonautes"]},
+    {"id":"E5","nom":"M. Bernard","prenom":"Luc","secteur":"Sud","quartiers":["La Plaine"]}
+  ],
+  "typologies": ["T1","T2","T3","T4","T5","T6"],
+  "secteurs": ["Nord","Sud","Est","Ouest","Centre"],
+  "quartiers": ["Floréal","Centre-ville","Franc-Moisin","La Plaine","Cosmonautes","Allende","Mutualité","La Courneuve"],
+  "bailleurs": ["Plaine Commune Habitat","Habitat 93","I3F","Efidis","Seine-Saint-Denis Habitat"],
+  "contingents": ["Ville","Préfecture","Action Logement","Bailleur"],
+  "situations_logement": ["locataire social","locataire privé","hébergé","sans logement","cohabitation","occupation précaire"],
+  "motifs_refus": [
+    "Inadéquation ressources / loyer",
+    "Composition familiale incompatible",
+    "Logement non adapté au handicap",
+    "Secteur non souhaité par le candidat",
+    "Candidat a refusé la proposition",
+    "Dossier incomplet au moment de la commission",
+    "Candidat déjà attributaire",
+    "Logement retiré par le bailleur",
+    "Priorité accordée à un public DALO",
+    "Décision reportée — dossier à compléter"
+  ],
+  "statuts_post_cal": ["En attente réponse candidat","Accepté","Refusé par candidat","Refusé par bailleur","Bail signé","Entrée dans les lieux","Sans suite"],
+  "historique_biais": {
+    "D1":{"nb_presentations":1,"nb_refus_non_motives":0,"derniere_proposition_mois":3},
+    "D2":{"nb_presentations":0,"nb_refus_non_motives":0,"derniere_proposition_mois":null},
+    "D3":{"nb_presentations":2,"nb_refus_non_motives":1,"derniere_proposition_mois":1},
+    "D4":{"nb_presentations":0,"nb_refus_non_motives":0,"derniere_proposition_mois":null},
+    "D5":{"nb_presentations":0,"nb_refus_non_motives":0,"derniere_proposition_mois":null},
+    "D6":{"nb_presentations":1,"nb_refus_non_motives":0,"derniere_proposition_mois":8},
+    "D7":{"nb_presentations":3,"nb_refus_non_motives":2,"derniere_proposition_mois":2},
+    "D8":{"nb_presentations":1,"nb_refus_non_motives":1,"derniere_proposition_mois":6},
+    "D9":{"nb_presentations":0,"nb_refus_non_motives":0,"derniere_proposition_mois":null},
+    "D10":{"nb_presentations":2,"nb_refus_non_motives":0,"derniere_proposition_mois":4}
+  }
+}

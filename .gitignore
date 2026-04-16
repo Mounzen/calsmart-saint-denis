@@ -1,0 +1,6 @@
+node_modules/
+dist/
+tmp/
+server/data/telegram_chats.json
+*.log
+.env

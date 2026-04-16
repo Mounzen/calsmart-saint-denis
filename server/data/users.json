@@ -1,0 +1,7 @@
+[
+  {"id":"U1","login":"admin","password":"calsmart2024","nom":"Administrateur","prenom":"CAL","role":"directeur","actif":true},
+  {"id":"U2","login":"agent1","password":"agent2024","nom":"Martin","prenom":"Sophie","role":"agent","actif":true},
+  {"id":"U3","login":"dupont","password":"elu2024","nom":"Dupont","prenom":"André","role":"elu","elu_id":"E1","secteur":"Nord","actif":true},
+  {"id":"U4","login":"leclerc","password":"elu2024","nom":"Leclerc","prenom":"Sophie","role":"elu","elu_id":"E2","secteur":"Centre","actif":true},
+  {"id":"U5","login":"traore","password":"elu2024","nom":"Traoré","prenom":"Moussa","role":"elu","elu_id":"E3","secteur":"Ouest","actif":true}
+]

@@ -2455,10 +2455,10 @@ function RealtimeTopBar() {
   const [panelOpen, setPanelOpen] = useState(false)
   return (
     <div style={{
-      position: 'fixed', top: 12, right: 20, zIndex: 900,
+      position: 'fixed', bottom: 20, right: 20, zIndex: 900,
       display: 'flex', alignItems: 'center', gap: 10,
       background: 'white', padding: '6px 12px', borderRadius: 10,
-      boxShadow: '0 2px 8px rgba(0,0,0,0.08)', border: '1px solid #e2e8f0'
+      boxShadow: '0 4px 14px rgba(0,0,0,0.12)', border: '1px solid #e2e8f0'
     }}>
       <PresenceGlobale />
       <div style={{ width: 1, height: 24, background: '#e2e8f0' }} />

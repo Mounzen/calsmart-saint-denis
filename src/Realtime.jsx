@@ -688,7 +688,7 @@ export function NotificationsPanel({ onClose, onNavigate }) {
 
   return (
     <div style={{
-      position: 'fixed', top: 60, right: 20, width: 380, maxHeight: '75vh',
+      position: 'fixed', bottom: 76, right: 20, width: 380, maxHeight: '75vh',
       background: 'white', borderRadius: 12, boxShadow: '0 20px 40px rgba(0,0,0,0.2)',
       zIndex: 1000, border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column'
     }}>
@@ -709,22 +709,4 @@ export function NotificationsPanel({ onClose, onNavigate }) {
             key={n.id}
             onClick={() => {
               marquerLu(n.id)
-              if (onNavigate) onNavigate(n)
-            }}
-            style={{
-              padding: 12, borderBottom: '1px solid #f1f5f9', cursor: 'pointer',
-              background: n.lu ? 'white' : '#f0f9ff'
-            }}
-          >
-            <div style={{ fontSize: 13, fontWeight: 600, color: '#1e3a8a', marginBottom: 2 }}>{n.titre}</div>
-            <div style={{ fontSize: 12, color: '#475569', lineHeight: 1.4 }}>{n.message}</div>
-            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
-              {new Date(n.created_at).toLocaleString('fr-FR')}
-              {n.entity_type && ' - ' + n.entity_type + ' ' + n.entity_id}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
+              if (onNaviga

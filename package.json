@@ -1,8 +1,8 @@
 {
-  "name": "cal-smart",
-  "version": "2.0.0",
+  "name": "logivia",
+  "version": "3.0.0",
   "type": "module",
-  "description": "CAL Smart — Ville de Saint-Denis",
+  "description": "Logivia — Gestion intelligente des attributions de logements · Ville de Saint-Denis",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "client": "vite --port 3000",
@@ -23,4 +23,3 @@
     "vite": "^5.0.0"
   }
 }
-

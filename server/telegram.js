@@ -1,5 +1,5 @@
 /**
- * CAL Smart — Telegram Bot
+ * CAL Smart - Telegram Bot
  * Notifications élus et candidats via Telegram
  * Token : 8365732100:AAHhqqnayRjBSQMIpyy3YHxZh6fYnMPexI0
  */
@@ -53,123 +53,123 @@ export async function sendMessage(chatId, text, options = {}) {
 
 export const MSG = {
 
-  // Élu — attribution suite à audience
+  // Élu - attribution suite à audience
   attribution_audience: (dem, logement, audience, jours) =>
-`🏠 <b>Attribution suite à votre audience</b>
+`[log] <b>Attribution suite à votre audience</b>
 
-<b>${dem.prenom} ${dem.nom}</b>, que vous avez reçu le ${audience.date_audience}, vient d'être attribué·e un <b>${logement.typ}</b> à <b>${logement.quartier}</b>.
+<b>${dem.prenom} ${dem.nom}</b>, que vous avez reçu le ${audience.date_audience}, vient d'être attribué-e un <b>${logement.typ}</b> à <b>${logement.quartier}</b>.
 
-📍 ${logement.adresse}
-💶 ${logement.loyer} €/mois
-⏱ Délai audience → attribution : <b>${jours} jours</b>
+[pin] ${logement.adresse}
+[EUR] ${logement.loyer} EUR/mois
+[tps] Délai audience -> attribution : <b>${jours} jours</b>
 
 <i>Votre intervention a contribué à cette attribution.</i>`,
 
-  // Élu — urgence sur son territoire
+  // Élu - urgence sur son territoire
   urgence_territoire: (dem, secteur, jours) =>
-`⚠️ <b>Urgence sur votre secteur — ${secteur}</b>
+`(!) <b>Urgence sur votre secteur - ${secteur}</b>
 
 <b>${dem.prenom} ${dem.nom}</b> attend une proposition depuis <b>${jours} jours</b>.
-Situation : ${dem.sit} · ${dem.compo}
-${dem.dalo ? '🔴 DALO reconnu' : ''}${dem.violences ? '🔴 VIF' : ''}${dem.sans_log ? '🔴 Sans logement' : ''}
+Situation : ${dem.sit} - ${dem.compo}
+${dem.dalo ? '[urg] DALO reconnu' : ''}${dem.violences ? '[urg] VIF' : ''}${dem.sans_log ? '[urg] Sans logement' : ''}
 
 <i>Action recommandée : relance service habitat.</i>`,
 
-  // Élu — digest hebdomadaire
+  // Élu - digest hebdomadaire
   digest_hebdo: (elu, stats) =>
-`📊 <b>Digest hebdo — ${elu.secteur}</b>
+`[stat] <b>Digest hebdo - ${elu.secteur}</b>
 
-👥 Demandeurs actifs : <b>${stats.nb_actifs}</b>
-🏠 Logements disponibles : <b>${stats.nb_logements}</b>
-⊛ Audiences en attente : <b>${stats.nb_audiences_attente}</b>
-✅ Attributions cette semaine : <b>${stats.nb_attrib_semaine}</b>
-⏱ Délai moyen d'attente : <b>${stats.delai_moyen} mois</b>
+[users] Demandeurs actifs : <b>${stats.nb_actifs}</b>
+[log] Logements disponibles : <b>${stats.nb_logements}</b>
+* Audiences en attente : <b>${stats.nb_audiences_attente}</b>
+[ok] Attributions cette semaine : <b>${stats.nb_attrib_semaine}</b>
+[tps] Délai moyen d'attente : <b>${stats.delai_moyen} mois</b>
 
-${stats.nb_urgents > 0 ? `🔴 <b>${stats.nb_urgents} dossier(s) urgent(s)</b> sans proposition` : '✅ Aucun dossier urgent en attente'}`,
+${stats.nb_urgents > 0 ? `[urg] <b>${stats.nb_urgents} dossier(s) urgent(s)</b> sans proposition` : '[ok] Aucun dossier urgent en attente'}`,
 
-  // Élu — CAL à venir
+  // Élu - CAL à venir
   cal_a_venir: (logement, nb_candidats, date_cal) =>
-`✦ <b>Commission CAL — ${date_cal}</b>
+`[cal] <b>Commission CAL - ${date_cal}</b>
 
 Un <b>${logement.typ}</b> à <b>${logement.quartier}</b> passe en commission.
-📍 ${logement.adresse}
-💶 ${logement.loyer} €/mois · Contingent : ${logement.contingent}
+[pin] ${logement.adresse}
+[EUR] ${logement.loyer} EUR/mois - Contingent : ${logement.contingent}
 
-👥 <b>${nb_candidats} candidat(s)</b> de votre secteur sont éligibles.`,
+[users] <b>${nb_candidats} candidat(s)</b> de votre secteur sont éligibles.`,
 
-  // Candidat — dossier incomplet
+  // Candidat - dossier incomplet
   dossier_incomplet: (dem) =>
-`📋 <b>Votre dossier logement</b>
+`[lst] <b>Votre dossier logement</b>
 
 Bonjour ${dem.prenom},
 Votre dossier de demande de logement social nécessite des pièces complémentaires.
 
 Merci de contacter le service habitat de la Ville de Saint-Denis pour régulariser votre situation.
 
-📞 Service Habitat — Mairie de Saint-Denis`,
+[tel] Service Habitat - Mairie de Saint-Denis`,
 
-  // Candidat — proposition de logement
+  // Candidat - proposition de logement
   proposition_logement: (dem, logement) =>
-`🏠 <b>Proposition de logement</b>
+`[log] <b>Proposition de logement</b>
 
 Bonjour ${dem.prenom},
-Vous avez été sélectionné·e pour un logement :
+Vous avez été sélectionné-e pour un logement :
 
-📍 <b>${logement.adresse}</b>
-🏢 ${logement.typ} · ${logement.surface} m²
-💶 ${logement.loyer} €/mois
-🏙 ${logement.quartier}
+[pin] <b>${logement.adresse}</b>
+[bat] ${logement.typ} - ${logement.surface} m2
+[EUR] ${logement.loyer} EUR/mois
+[vle] ${logement.quartier}
 
 Le service habitat va vous contacter prochainement.
-<i>Répondez rapidement — votre dossier sera dépriorisé en cas de non-réponse sous 10 jours.</i>`,
+<i>Répondez rapidement - votre dossier sera dépriorisé en cas de non-réponse sous 10 jours.</i>`,
 
-  // Candidat — décision CAL
+  // Candidat - décision CAL
   decision_cal: (dem, decision, logement) =>
-`✦ <b>Décision de commission</b>
+`[cal] <b>Décision de commission</b>
 
 Bonjour ${dem.prenom},
 La commission d'attribution s'est réunie concernant votre dossier.
 
 ${decision.includes('Retenu') ?
-  `✅ Vous êtes <b>retenu·e (${decision})</b> pour le logement :\n📍 ${logement?.adresse || '—'}\n\nLe bailleur vous contactera pour la suite.` :
+  `[ok] Vous êtes <b>retenu-e (${decision})</b> pour le logement :\n[pin] ${logement?.adresse || '-'}\n\nLe bailleur vous contactera pour la suite.` :
   decision === 'Suppléant' ?
-  `⏳ Vous êtes <b>suppléant·e</b>. Vous pourrez être contacté·e si le candidat principal renonce.` :
-  `❌ Votre candidature n'a pas été retenue lors de cette commission.\n\nVotre dossier reste actif pour les prochaines commissions.`
+  `[att] Vous êtes <b>suppléant-e</b>. Vous pourrez être contacté-e si le candidat principal renonce.` :
+  `[err] Votre candidature n'a pas été retenue lors de cette commission.\n\nVotre dossier reste actif pour les prochaines commissions.`
 }`,
 
   // Message de bienvenue au démarrage du bot
   bienvenue_elu: (elu) =>
-`👋 <b>Bienvenue sur CAL Smart</b>
+`? <b>Bienvenue sur CAL Smart</b>
 
 Bonjour ${elu.prenom} ${elu.nom},
-Vous êtes connecté·e au bot de notifications CAL Smart — Ville de Saint-Denis.
+Vous êtes connecté-e au bot de notifications CAL Smart - Ville de Saint-Denis.
 
 Vous recevrez sur ce canal :
-• 🏠 Les attributions suite à vos audiences
-• ⚠️ Les urgences sur votre secteur (${elu.secteur})
-• 📊 Votre digest hebdomadaire
-• ✦ Les CAL concernant votre territoire
+- [log] Les attributions suite à vos audiences
+- (!) Les urgences sur votre secteur (${elu.secteur})
+- [stat] Votre digest hebdomadaire
+- [cal] Les CAL concernant votre territoire
 
 <i>Tapez /aide pour voir les commandes disponibles.</i>`,
 
   bienvenue_candidat: (dem) =>
-`👋 <b>Notifications logement social</b>
+`? <b>Notifications logement social</b>
 <b>Ville de Saint-Denis</b>
 
 Bonjour ${dem.prenom},
-Vous êtes inscrit·e pour recevoir les notifications concernant votre dossier de demande de logement.
+Vous êtes inscrit-e pour recevoir les notifications concernant votre dossier de demande de logement.
 
-Vous serez averti·e en cas de :
-• Pièce manquante à votre dossier
-• Proposition de logement
-• Décision de commission
-• Attribution confirmée
+Vous serez averti-e en cas de :
+- Pièce manquante à votre dossier
+- Proposition de logement
+- Décision de commission
+- Attribution confirmée
 
-<i>NUD : ${dem.nud || '—'}</i>`,
+<i>NUD : ${dem.nud || '-'}</i>`,
 }
 
 // ─── GESTION DES CHAT IDS ─────────────────────────────────────────────────────
-// Stocke les associations user/elu → chat_id Telegram
+// Stocke les associations user/elu -> chat_id Telegram
 
 export function saveChatId(type, id, chatId) {
   // type = 'elu' | 'demandeur' | 'user'
@@ -195,7 +195,7 @@ export function getAllChatIds(type) {
   } catch(e) { return {} }
 }
 
-// ─── WEBHOOK — ÉCOUTE LES MESSAGES ENTRANTS ──────────────────────────────────
+// ─── WEBHOOK - ÉCOUTE LES MESSAGES ENTRANTS ──────────────────────────────────
 // Quand un élu ou candidat écrit au bot, on enregistre son chat_id
 
 export async function handleWebhook(body) {
@@ -238,16 +238,20 @@ export async function handleWebhook(body) {
       }
     }
 
-    // Pas de token — message générique
+    // Pas de token - message generique avec exposition du chat_id pour tests admin
     await sendMessage(chatId,
-      `👋 <b>CAL Smart — Ville de Saint-Denis</b>\n\nPour vous connecter, utilisez le lien fourni par le service habitat.\n\nSi vous êtes un élu, contactez l'administrateur pour obtenir votre lien de connexion.`
+      `<b>Logivia - Ville de Saint-Denis</b>\n\n` +
+      `Bienvenue sur le bot officiel Logivia.\n\n` +
+      `Pour vous connecter a votre dossier, utilisez le lien personnel fourni par le service habitat.\n\n` +
+      `<b>Votre identifiant de chat Telegram :</b>\n<code>${chatId}</code>\n\n` +
+      `Un administrateur peut utiliser cet identifiant pour vous envoyer un message de test directement depuis l'application.`
     )
     return
   }
 
   if (text === '/aide' || text === '/help') {
     await sendMessage(chatId,
-      `📋 <b>Commandes disponibles</b>\n\n/start — Se connecter\n/statut — Voir votre statut\n/aide — Cette aide`
+      `[lst] <b>Commandes disponibles</b>\n\n/start - Se connecter\n/statut - Voir votre statut\n/aide - Cette aide`
     )
     return
   }
@@ -262,12 +266,12 @@ export async function handleWebhook(body) {
     if (eluId) {
       const ref = readData('referentiels.json')
       const elu = (ref.elus||[]).find(e=>e.id===eluId)
-      await sendMessage(chatId, `✅ Connecté en tant qu'élu : <b>${elu?.nom || eluId}</b>`)
+      await sendMessage(chatId, `[ok] Connecté en tant qu'élu : <b>${elu?.nom || eluId}</b>`)
     } else if (demId) {
       const dem = readData('demandeurs.json').find(d=>d.id===demId)
-      await sendMessage(chatId, `✅ Connecté en tant que demandeur : <b>${dem?.nom} ${dem?.prenom}</b>`)
+      await sendMessage(chatId, `[ok] Connecté en tant que demandeur : <b>${dem?.nom} ${dem?.prenom}</b>`)
     } else {
-      await sendMessage(chatId, `❌ Non connecté. Utilisez le lien fourni par le service habitat.`)
+      await sendMessage(chatId, `[err] Non connecté. Utilisez le lien fourni par le service habitat.`)
     }
     return
   }
@@ -332,7 +336,7 @@ export async function notifierUrgenceElu(eluId, dem, secteur, jours) {
 }
 
 // Notifier un candidat d'une proposition
-export async function notifierPropositionCandidат(demId, dem, logement) {
+export async function notifierPropositionCandidat(demId, dem, logement) {
   const chatId = getChatId('demandeur', demId)
   if (!chatId) return false
   return sendMessage(chatId, MSG.proposition_logement(dem, logement))
@@ -350,6 +354,6 @@ export function genererLienElu(eluId) {
   return `https://t.me/CALSmartSaintDenis_bot?start=elu_${eluId}`
 }
 
-export function genererLienCandidат(demId) {
+export function genererLienCandidat(demId) {
   return `https://t.me/CALSmartSaintDenis_bot?start=dem_${demId}`
 }

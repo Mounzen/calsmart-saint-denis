@@ -3,10 +3,43 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CAL Smart — Saint-Denis</title>
+    <meta name="description" content="Logivia - Gestion intelligente des attributions de logements sociaux - Ville de Saint-Denis" />
+    <meta name="theme-color" content="#0B1E3D" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Logivia — Saint-Denis</title>
+    <style>
+      /* Pré-splash statique pour éviter le flash blanc pendant le chargement du JS */
+      html, body, #root { margin: 0; padding: 0; height: 100%; }
+      body {
+        background: linear-gradient(135deg, #0B1E3D 0%, #1D3557 60%, #0B1E3D 100%);
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      #pre-splash {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        flex-direction: column; color: #fff; z-index: 99999;
+      }
+      #pre-splash .logo {
+        width: 70px; height: 70px; border-radius: 18px;
+        background: linear-gradient(135deg, #E05C2A 0%, #F68144 100%);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 34px; font-weight: 900; margin-bottom: 18px;
+        box-shadow: 0 16px 40px rgba(224,92,42,0.35);
+        animation: preSplashPulse 1.4s ease-in-out infinite;
+      }
+      #pre-splash .label { font-size: 24px; font-weight: 800; letter-spacing: -0.03em; opacity: 0.85; }
+      @keyframes preSplashPulse {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.06); }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="pre-splash">
+        <div class="logo">L</div>
+        <div class="label">Logivia</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

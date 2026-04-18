@@ -1,5 +1,55 @@
 [
-  {"id":"N1","date":"18/03/2024","heure":"09:14","elu_id":"E3","type":"attribution_audience","titre":"Attribution suite à votre audience","message":"M. Lambert Jean-Pierre, que vous avez reçu le 03/02/2023 pour une expulsion imminente, vient d'être attribué un T4 à Floréal. Délai : 137 jours.","dem_id":"D6","logement_ref":"I3F-887","quartier":"Floréal","lu":false,"favorable":true},
-  {"id":"N2","date":"10/04/2024","heure":"10:00","elu_id":"E2","type":"urgence_territoire","titre":"Dossier DALO sans attribution — Centre-ville","message":"Mme Rodriguez Maria (DALO reconnu, VIF) est hébergée depuis 4 ans. 555 jours sans attribution. Action recommandée.","dem_id":"D2","logement_ref":null,"quartier":"Centre-ville","lu":false,"favorable":null},
-  {"id":"N3","date":"01/04/2024","heure":"09:00","elu_id":"E1","type":"digest","titre":"Digest hebdomadaire — Secteur Nord","message":"Cette semaine : 18 demandeurs actifs · 2 logements disponibles · 1 audience favorable en attente.","dem_id":null,"logement_ref":null,"quartier":"Floréal","lu":false,"favorable":null}
+  {
+    "id": "N1",
+    "date": "18/03/2024",
+    "heure": "09:14",
+    "elu_id": "E3",
+    "type": "attribution_audience",
+    "titre": "Attribution suite à votre audience",
+    "message": "M. Lambert Jean-Pierre, que vous avez reçu le 03/02/2023 pour une expulsion imminente, vient d'être attribué un T4 à Floréal. Délai : 137 jours.",
+    "dem_id": "D6",
+    "logement_ref": "I3F-887",
+    "quartier": "Floréal",
+    "lu": false,
+    "favorable": true
+  },
+  {
+    "id": "N2",
+    "date": "10/04/2024",
+    "heure": "10:00",
+    "elu_id": "E2",
+    "type": "urgence_territoire",
+    "titre": "Dossier DALO sans attribution — Centre-ville",
+    "message": "Mme Rodriguez Maria (DALO reconnu, VIF) est hébergée depuis 4 ans. 555 jours sans attribution. Action recommandée.",
+    "dem_id": "D2",
+    "logement_ref": null,
+    "quartier": "Centre-ville",
+    "lu": false,
+    "favorable": null
+  },
+  {
+    "id": "N3",
+    "date": "01/04/2024",
+    "heure": "09:00",
+    "elu_id": "E1",
+    "type": "digest",
+    "titre": "Digest hebdomadaire — Secteur Nord",
+    "message": "Cette semaine : 18 demandeurs actifs · 2 logements disponibles · 1 audience favorable en attente.",
+    "dem_id": null,
+    "logement_ref": null,
+    "quartier": "Floréal",
+    "lu": false,
+    "favorable": null
+  },
+  {
+    "id": "NT4",
+    "user_id": "U1",
+    "type": "mention",
+    "entity_type": "demandeur",
+    "entity_id": "D1",
+    "titre": "Mention de Administrateur",
+    "message": "Test @admin",
+    "lu": false,
+    "created_at": "2026-04-17T17:48:44.269Z"
+  }
 ]

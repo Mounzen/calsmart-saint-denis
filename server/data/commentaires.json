@@ -1,0 +1,22 @@
+[
+  {
+    "id": "CM1",
+    "entity_type": "demandeur",
+    "entity_id": "D1",
+    "user_id": "U1",
+    "user_nom": "Administrateur",
+    "user_role": "directeur",
+    "texte": "Test @admin",
+    "mentions": [
+      {
+        "id": "U1",
+        "login": "admin",
+        "nom": "Administrateur",
+        "prenom": "CAL"
+      }
+    ],
+    "created_at": "2026-04-17T17:48:44.269Z",
+    "edited_at": null,
+    "reactions": {}
+  }
+]

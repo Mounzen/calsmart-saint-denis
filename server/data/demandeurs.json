@@ -1,12 +1,443 @@
 [
-  {"id":"D1","nud":"93284-2021-00142","nom":"MBAYE","prenom":"Ousmane","anc":38,"adultes":2,"enfants":3,"compo":"Couple + 3 enfants","typ_v":"T4","typ_min":"T3","typ_max":"T5","secteurs":["Nord","Ouest","Est"],"quartiers":["Floréal","Franc-Moisin"],"rev":2650,"pmr":false,"rdc":false,"violences":false,"handicap":false,"sans_log":false,"expulsion":false,"urgence":true,"suroc":true,"grossesse":false,"dalo":false,"mutation":false,"prio_handicap":false,"prio_expulsion":false,"pieces":true,"statut":"active","sit":"locataire social","quartier_origine":"Floréal","parcours":[{"date":"14/03/2021","type":"Demande créée","detail":"Dépôt en ligne"},{"date":"05/09/2023","type":"Audience élu","detail":"M. Dupont — suroccupation"}]},
-  {"id":"D2","nud":"93284-2020-00891","nom":"RODRIGUEZ","prenom":"Maria","anc":52,"adultes":1,"enfants":2,"compo":"Parent isolé + 2 enfants","typ_v":"T3","typ_min":"T3","typ_max":"T3","secteurs":["Centre","Nord"],"quartiers":["Centre-ville","Floréal"],"rev":1820,"pmr":false,"rdc":false,"violences":true,"handicap":false,"sans_log":false,"expulsion":false,"urgence":true,"suroc":false,"grossesse":false,"dalo":true,"mutation":false,"prio_handicap":false,"prio_expulsion":false,"pieces":true,"statut":"active","sit":"hébergé","quartier_origine":"Centre-ville","parcours":[{"date":"08/01/2020","type":"Demande créée","detail":""},{"date":"20/06/2022","type":"DALO reconnu","detail":"Commission favorable"}]},
-  {"id":"D3","nud":"93284-2022-01204","nom":"DIALLO","prenom":"Fatoumata","anc":19,"adultes":2,"enfants":1,"compo":"Couple + 1 enfant","typ_v":"T3","typ_min":"T2","typ_max":"T4","secteurs":["Est","Nord"],"quartiers":["Cosmonautes","Floréal"],"rev":2100,"pmr":false,"rdc":false,"violences":false,"handicap":false,"sans_log":false,"expulsion":false,"urgence":false,"suroc":false,"grossesse":true,"dalo":false,"mutation":false,"prio_handicap":false,"prio_expulsion":false,"pieces":true,"statut":"active","sit":"locataire privé","quartier_origine":"Cosmonautes","parcours":[{"date":"22/11/2022","type":"Demande créée","detail":""}]},
-  {"id":"D4","nud":"93284-2019-00334","nom":"NGUYEN","prenom":"Van Thanh","anc":61,"adultes":1,"enfants":0,"compo":"Personne seule","typ_v":"T1","typ_min":"T1","typ_max":"T2","secteurs":["Sud","Centre"],"quartiers":["La Plaine","Centre-ville"],"rev":1140,"pmr":true,"rdc":true,"violences":false,"handicap":true,"sans_log":false,"expulsion":false,"urgence":false,"suroc":false,"grossesse":false,"dalo":false,"mutation":false,"prio_handicap":true,"prio_expulsion":false,"pieces":true,"statut":"active","sit":"cohabitation","quartier_origine":"La Plaine","parcours":[{"date":"05/05/2019","type":"Demande créée","detail":""},{"date":"18/08/2021","type":"Audience élu","detail":"M. Bernard — handicap, RDC requis"}]},
-  {"id":"D5","nud":"93284-2023-00788","nom":"BAMBA","prenom":"Aminata","anc":8,"adultes":1,"enfants":1,"compo":"Parent isolé + 1 enfant","typ_v":"T2","typ_min":"T2","typ_max":"T2","secteurs":["Nord","Ouest"],"quartiers":["Floréal","Franc-Moisin"],"rev":1280,"pmr":false,"rdc":false,"violences":true,"handicap":false,"sans_log":true,"expulsion":false,"urgence":true,"suroc":false,"grossesse":false,"dalo":false,"mutation":false,"prio_handicap":false,"prio_expulsion":false,"pieces":false,"statut":"active","sit":"sans logement","quartier_origine":"Franc-Moisin","parcours":[{"date":"12/10/2023","type":"Demande créée","detail":"Urgence sociale"}]},
-  {"id":"D6","nud":"93284-2021-00567","nom":"LAMBERT","prenom":"Jean-Pierre","anc":33,"adultes":2,"enfants":4,"compo":"Couple + 4 enfants","typ_v":"T4","typ_min":"T4","typ_max":"T5","secteurs":["Ouest","Nord"],"quartiers":["Franc-Moisin","Floréal"],"rev":3100,"pmr":false,"rdc":false,"violences":false,"handicap":false,"sans_log":false,"expulsion":true,"urgence":true,"suroc":true,"grossesse":false,"dalo":false,"mutation":false,"prio_handicap":false,"prio_expulsion":true,"pieces":true,"statut":"active","sit":"locataire privé","quartier_origine":"Franc-Moisin","parcours":[{"date":"14/09/2021","type":"Demande créée","detail":""},{"date":"18/03/2023","type":"Urgence expulsion","detail":"Jugement rendu"}]},
-  {"id":"D7","nud":"93284-2022-00923","nom":"TOURE","prenom":"Mariam","anc":14,"adultes":1,"enfants":2,"compo":"Parent isolé + 2 enfants","typ_v":"T3","typ_min":"T2","typ_max":"T3","secteurs":["Est","Centre"],"quartiers":["Cosmonautes","Centre-ville"],"rev":1650,"pmr":false,"rdc":false,"violences":false,"handicap":false,"sans_log":false,"expulsion":false,"urgence":false,"suroc":true,"grossesse":false,"dalo":false,"mutation":false,"prio_handicap":false,"prio_expulsion":false,"pieces":true,"statut":"active","sit":"locataire social","quartier_origine":"Centre-ville","parcours":[{"date":"08/04/2022","type":"Demande créée","detail":"Suroccupation T1"}]},
-  {"id":"D8","nud":"93284-2020-00445","nom":"CHEN","prenom":"Wei","anc":45,"adultes":2,"enfants":2,"compo":"Couple + 2 enfants","typ_v":"T3","typ_min":"T3","typ_max":"T4","secteurs":["Sud","Est"],"quartiers":["La Plaine","Cosmonautes"],"rev":2400,"pmr":false,"rdc":false,"violences":false,"handicap":false,"sans_log":false,"expulsion":false,"urgence":false,"suroc":false,"grossesse":false,"dalo":false,"mutation":true,"prio_handicap":false,"prio_expulsion":false,"pieces":true,"statut":"active","sit":"locataire social","quartier_origine":"La Plaine","parcours":[{"date":"15/09/2020","type":"Demande créée","detail":"Mutation"}]},
-  {"id":"D9","nud":"93284-2023-01102","nom":"DEMBELE","prenom":"Ibrahim","anc":5,"adultes":1,"enfants":0,"compo":"Personne seule","typ_v":"T1","typ_min":"T1","typ_max":"T2","secteurs":["Centre","Sud","Nord"],"quartiers":["Centre-ville","La Plaine"],"rev":980,"pmr":false,"rdc":false,"violences":false,"handicap":false,"sans_log":true,"expulsion":false,"urgence":true,"suroc":false,"grossesse":false,"dalo":false,"mutation":false,"prio_handicap":false,"prio_expulsion":false,"pieces":false,"statut":"active","sit":"sans logement","quartier_origine":"Centre-ville","parcours":[{"date":"05/01/2024","type":"Demande créée","detail":"Sans logement"}]},
-  {"id":"D10","nud":"93284-2021-00891","nom":"MARTIN","prenom":"Sophie","anc":28,"adultes":1,"enfants":1,"compo":"Parent isolé + 1 enfant","typ_v":"T2","typ_min":"T2","typ_max":"T3","secteurs":["Nord","Est","Centre"],"quartiers":["Floréal","Cosmonautes"],"rev":1900,"pmr":false,"rdc":false,"violences":false,"handicap":false,"sans_log":false,"expulsion":false,"urgence":false,"suroc":false,"grossesse":false,"dalo":false,"mutation":false,"prio_handicap":false,"prio_expulsion":false,"pieces":true,"statut":"active","sit":"locataire privé","quartier_origine":"Floréal","parcours":[{"date":"03/02/2021","type":"Demande créée","detail":""}]}
+  {
+    "id": "D1",
+    "nud": "93284-2021-00142",
+    "nom": "MBAYE",
+    "prenom": "Ousmane",
+    "anc": 38,
+    "adultes": 2,
+    "enfants": 3,
+    "compo": "Couple + 3 enfants",
+    "typ_v": "T4",
+    "typ_min": "T3",
+    "typ_max": "T5",
+    "secteurs": [
+      "Nord",
+      "Ouest",
+      "Est"
+    ],
+    "quartiers": [
+      "Floréal",
+      "Franc-Moisin"
+    ],
+    "rev": 2650,
+    "pmr": false,
+    "rdc": false,
+    "violences": false,
+    "handicap": true,
+    "sans_log": false,
+    "expulsion": false,
+    "urgence": true,
+    "suroc": true,
+    "grossesse": false,
+    "dalo": false,
+    "mutation": false,
+    "prio_handicap": false,
+    "prio_expulsion": false,
+    "pieces": true,
+    "statut": "active",
+    "sit": "locataire social",
+    "quartier_origine": "Floréal",
+    "parcours": [
+      {
+        "date": "14/03/2021",
+        "type": "Demande créée",
+        "detail": "Dépôt en ligne"
+      },
+      {
+        "date": "05/09/2023",
+        "type": "Audience élu",
+        "detail": "M. Dupont — suroccupation"
+      },
+      {
+        "date": "17/04/2026",
+        "type": "Modification fiche",
+        "detail": "Audience elu (1 champ) - par CAL Administrateur"
+      }
+    ]
+  },
+  {
+    "id": "D2",
+    "nud": "93284-2020-00891",
+    "nom": "RODRIGUEZ",
+    "prenom": "Maria",
+    "anc": 52,
+    "adultes": 1,
+    "enfants": 2,
+    "compo": "Parent isolé + 2 enfants",
+    "typ_v": "T3",
+    "typ_min": "T3",
+    "typ_max": "T3",
+    "secteurs": [
+      "Centre",
+      "Nord"
+    ],
+    "quartiers": [
+      "Centre-ville",
+      "Floréal"
+    ],
+    "rev": 1820,
+    "pmr": false,
+    "rdc": false,
+    "violences": true,
+    "handicap": false,
+    "sans_log": false,
+    "expulsion": false,
+    "urgence": true,
+    "suroc": false,
+    "grossesse": false,
+    "dalo": true,
+    "mutation": false,
+    "prio_handicap": false,
+    "prio_expulsion": false,
+    "pieces": true,
+    "statut": "active",
+    "sit": "hébergé",
+    "quartier_origine": "Centre-ville",
+    "parcours": [
+      {
+        "date": "08/01/2020",
+        "type": "Demande créée",
+        "detail": ""
+      },
+      {
+        "date": "20/06/2022",
+        "type": "DALO reconnu",
+        "detail": "Commission favorable"
+      }
+    ]
+  },
+  {
+    "id": "D3",
+    "nud": "93284-2022-01204",
+    "nom": "DIALLO",
+    "prenom": "Fatoumata",
+    "anc": 19,
+    "adultes": 2,
+    "enfants": 1,
+    "compo": "Couple + 1 enfant",
+    "typ_v": "T3",
+    "typ_min": "T2",
+    "typ_max": "T4",
+    "secteurs": [
+      "Est",
+      "Nord"
+    ],
+    "quartiers": [
+      "Cosmonautes",
+      "Floréal"
+    ],
+    "rev": 2100,
+    "pmr": false,
+    "rdc": false,
+    "violences": false,
+    "handicap": false,
+    "sans_log": false,
+    "expulsion": false,
+    "urgence": false,
+    "suroc": false,
+    "grossesse": true,
+    "dalo": false,
+    "mutation": false,
+    "prio_handicap": false,
+    "prio_expulsion": false,
+    "pieces": true,
+    "statut": "active",
+    "sit": "locataire privé",
+    "quartier_origine": "Cosmonautes",
+    "parcours": [
+      {
+        "date": "22/11/2022",
+        "type": "Demande créée",
+        "detail": ""
+      }
+    ]
+  },
+  {
+    "id": "D4",
+    "nud": "93284-2019-00334",
+    "nom": "NGUYEN",
+    "prenom": "Van Thanh",
+    "anc": 61,
+    "adultes": 1,
+    "enfants": 0,
+    "compo": "Personne seule",
+    "typ_v": "T1",
+    "typ_min": "T1",
+    "typ_max": "T2",
+    "secteurs": [
+      "Sud",
+      "Centre"
+    ],
+    "quartiers": [
+      "La Plaine",
+      "Centre-ville"
+    ],
+    "rev": 1140,
+    "pmr": true,
+    "rdc": true,
+    "violences": false,
+    "handicap": true,
+    "sans_log": false,
+    "expulsion": false,
+    "urgence": false,
+    "suroc": false,
+    "grossesse": false,
+    "dalo": false,
+    "mutation": false,
+    "prio_handicap": true,
+    "prio_expulsion": false,
+    "pieces": true,
+    "statut": "active",
+    "sit": "cohabitation",
+    "quartier_origine": "La Plaine",
+    "parcours": [
+      {
+        "date": "05/05/2019",
+        "type": "Demande créée",
+        "detail": ""
+      },
+      {
+        "date": "18/08/2021",
+        "type": "Audience élu",
+        "detail": "M. Bernard — handicap, RDC requis"
+      }
+    ]
+  },
+  {
+    "id": "D5",
+    "nud": "93284-2023-00788",
+    "nom": "BAMBA",
+    "prenom": "Aminata",
+    "anc": 8,
+    "adultes": 1,
+    "enfants": 1,
+    "compo": "Parent isolé + 1 enfant",
+    "typ_v": "T2",
+    "typ_min": "T2",
+    "typ_max": "T2",
+    "secteurs": [
+      "Nord",
+      "Ouest"
+    ],
+    "quartiers": [
+      "Floréal",
+      "Franc-Moisin"
+    ],
+    "rev": 1280,
+    "pmr": false,
+    "rdc": false,
+    "violences": true,
+    "handicap": false,
+    "sans_log": true,
+    "expulsion": false,
+    "urgence": true,
+    "suroc": false,
+    "grossesse": false,
+    "dalo": false,
+    "mutation": false,
+    "prio_handicap": false,
+    "prio_expulsion": false,
+    "pieces": false,
+    "statut": "annule",
+    "sit": "sans logement",
+    "quartier_origine": "Franc-Moisin",
+    "parcours": [
+      {
+        "date": "12/10/2023",
+        "type": "Demande créée",
+        "detail": "Urgence sociale"
+      }
+    ]
+  },
+  {
+    "id": "D6",
+    "nud": "93284-2021-00567",
+    "nom": "LAMBERT",
+    "prenom": "Jean-Pierre",
+    "anc": 33,
+    "adultes": 2,
+    "enfants": 4,
+    "compo": "Couple + 4 enfants",
+    "typ_v": "T4",
+    "typ_min": "T4",
+    "typ_max": "T5",
+    "secteurs": [
+      "Ouest",
+      "Nord"
+    ],
+    "quartiers": [
+      "Franc-Moisin",
+      "Floréal"
+    ],
+    "rev": 3100,
+    "pmr": false,
+    "rdc": false,
+    "violences": false,
+    "handicap": false,
+    "sans_log": false,
+    "expulsion": true,
+    "urgence": true,
+    "suroc": true,
+    "grossesse": false,
+    "dalo": false,
+    "mutation": false,
+    "prio_handicap": false,
+    "prio_expulsion": true,
+    "pieces": true,
+    "statut": "annule",
+    "sit": "locataire privé",
+    "quartier_origine": "Franc-Moisin",
+    "parcours": [
+      {
+        "date": "14/09/2021",
+        "type": "Demande créée",
+        "detail": ""
+      },
+      {
+        "date": "18/03/2023",
+        "type": "Urgence expulsion",
+        "detail": "Jugement rendu"
+      }
+    ]
+  },
+  {
+    "id": "D7",
+    "nud": "93284-2022-00923",
+    "nom": "TOURE",
+    "prenom": "Mariam",
+    "anc": 14,
+    "adultes": 1,
+    "enfants": 2,
+    "compo": "Parent isolé + 2 enfants",
+    "typ_v": "T3",
+    "typ_min": "T2",
+    "typ_max": "T3",
+    "secteurs": [
+      "Est",
+      "Centre"
+    ],
+    "quartiers": [
+      "Cosmonautes",
+      "Centre-ville"
+    ],
+    "rev": 1650,
+    "pmr": false,
+    "rdc": false,
+    "violences": false,
+    "handicap": false,
+    "sans_log": false,
+    "expulsion": false,
+    "urgence": false,
+    "suroc": true,
+    "grossesse": false,
+    "dalo": false,
+    "mutation": false,
+    "prio_handicap": false,
+    "prio_expulsion": false,
+    "pieces": true,
+    "statut": "active",
+    "sit": "locataire social",
+    "quartier_origine": "Centre-ville",
+    "parcours": [
+      {
+        "date": "08/04/2022",
+        "type": "Demande créée",
+        "detail": "Suroccupation T1"
+      }
+    ]
+  },
+  {
+    "id": "D8",
+    "nud": "93284-2020-00445",
+    "nom": "CHEN",
+    "prenom": "Wei",
+    "anc": 45,
+    "adultes": 2,
+    "enfants": 2,
+    "compo": "Couple + 2 enfants",
+    "typ_v": "T3",
+    "typ_min": "T3",
+    "typ_max": "T4",
+    "secteurs": [
+      "Sud",
+      "Est"
+    ],
+    "quartiers": [
+      "La Plaine",
+      "Cosmonautes"
+    ],
+    "rev": 2400,
+    "pmr": false,
+    "rdc": false,
+    "violences": false,
+    "handicap": false,
+    "sans_log": false,
+    "expulsion": false,
+    "urgence": false,
+    "suroc": false,
+    "grossesse": false,
+    "dalo": false,
+    "mutation": true,
+    "prio_handicap": false,
+    "prio_expulsion": false,
+    "pieces": true,
+    "statut": "active",
+    "sit": "locataire social",
+    "quartier_origine": "La Plaine",
+    "parcours": [
+      {
+        "date": "15/09/2020",
+        "type": "Demande créée",
+        "detail": "Mutation"
+      }
+    ]
+  },
+  {
+    "id": "D9",
+    "nud": "93284-2023-01102",
+    "nom": "DEMBELE",
+    "prenom": "Ibrahim",
+    "anc": 5,
+    "adultes": 1,
+    "enfants": 0,
+    "compo": "Personne seule",
+    "typ_v": "T1",
+    "typ_min": "T1",
+    "typ_max": "T2",
+    "secteurs": [
+      "Centre",
+      "Sud",
+      "Nord"
+    ],
+    "quartiers": [
+      "Centre-ville",
+      "La Plaine"
+    ],
+    "rev": 980,
+    "pmr": false,
+    "rdc": false,
+    "violences": false,
+    "handicap": false,
+    "sans_log": true,
+    "expulsion": false,
+    "urgence": true,
+    "suroc": false,
+    "grossesse": false,
+    "dalo": false,
+    "mutation": false,
+    "prio_handicap": false,
+    "prio_expulsion": false,
+    "pieces": false,
+    "statut": "active",
+    "sit": "sans logement",
+    "quartier_origine": "Centre-ville",
+    "parcours": [
+      {
+        "date": "05/01/2024",
+        "type": "Demande créée",
+        "detail": "Sans logement"
+      }
+    ]
+  }
 ]

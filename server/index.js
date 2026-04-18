@@ -1,424 +1,935 @@
 /**
- * CAL Smart — Serveur Express
- * Port : 4000
- * Le client React tourne sur port 3000 et proxifie /api vers ici
+ * Logivia v3.0 - Serveur Express
+ * Ville de Saint-Denis
  */
 
 import express from 'express'
 import cors from 'cors'
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs'
-import { spawn } from 'child_process'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, readdirSync, copyFileSync, statSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import path from 'path'
 import { randomBytes } from 'crypto'
+import { spawn } from 'child_process'
 import {
-  sendMessage, handleWebhook, saveChatId, getChatId,
-  notifierAttributionElu, notifierUrgenceElu,
-  notifierPropositionCandidат, notifierDecisionCAL,
-  envoyerDigestHebdo, genererLienElu, genererLienCandidат,
-  MSG
+  sendMessage as tgSend,
+  MSG as tgMSG,
+  getChatId as tgGetChatId,
+  getAllChatIds as tgGetAllChatIds,
+  saveChatId as tgSaveChatId,
+  genererLienElu,
+  genererLienCandidat,
+  envoyerDigestHebdo,
+  handleWebhook as tgHandleWebhook
 } from './telegram.js'
+import {
+  registerSseClient,
+  broadcast as rtBroadcast,
+  broadcastToUser as rtBroadcastToUser,
+  broadcastToRoles as rtBroadcastToRoles,
+  setPresence as rtSetPresence,
+  getPresenceSummary as rtGetPresence,
+  whoIsOnEntity as rtWhoIsOnEntity,
+  acquireLock as rtAcquireLock,
+  releaseLock as rtReleaseLock,
+  getLock as rtGetLock,
+  getAllLocks as rtGetAllLocks,
+  getConnectedClientsCount as rtConnectedCount
+} from './realtime.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const DATA = join(__dirname, 'data')
-const DIST = join(__dirname, '../dist') // React build en production
 
-const IS_PROD = process.env.NODE_ENV === 'production' || existsSync(DIST)
+// DATA_DIR : sur Railway, on monte un Volume sur /data ; en local, fallback ./server/data
+const SEED_DATA = join(__dirname, 'data')
+const DATA = process.env.DATA_DIR || SEED_DATA
+const DIST = join(__dirname, '../dist')
+const TMP = join(__dirname, '../tmp')
 
-const app = express()
+if (!existsSync(DATA)) mkdirSync(DATA, { recursive: true })
+if (!existsSync(TMP)) mkdirSync(TMP, { recursive: true })
 
-// CORS : en dev on accepte localhost:3000, en prod tout (même domaine)
-app.use(cors({
-  origin: IS_PROD ? true : 'http://localhost:3000',
-  credentials: true
-}))
-app.use(express.json())
-
-// En production : servir les fichiers React buildés
-if (IS_PROD) {
-  app.use(express.static(DIST))
-  console.log('[CAL Smart] Mode production — serveur les fichiers depuis dist/')
+/**
+ * Sur premier boot Railway, le Volume monte est vide. On seed depuis le repo
+ * les fichiers JSON de reference (referentiels, users) et on cree les autres vides.
+ * Une fois qu'un fichier existe deja dans le Volume, on ne l'ecrase JAMAIS.
+ */
+if (DATA !== SEED_DATA && existsSync(SEED_DATA)) {
+  try {
+    const fichiers = readdirSync(SEED_DATA).filter(f => f.endsWith('.json'))
+    let seeded = 0
+    for (const f of fichiers) {
+      const dst = join(DATA, f)
+      if (!existsSync(dst)) {
+        copyFileSync(join(SEED_DATA, f), dst)
+        seeded++
+      }
+    }
+    if (seeded > 0) console.log('[seed] ' + seeded + ' fichier(s) JSON copies dans ' + DATA)
+  } catch (e) {
+    console.error('[seed] erreur:', e.message)
+  }
 }
 
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
+// ============================================================
+// HELPERS DATA
+// ============================================================
 
 function readData(file) {
-  return JSON.parse(readFileSync(join(DATA, file), 'utf8'))
+  const path = join(DATA, file)
+  try {
+    if (!existsSync(path)) return []
+    const raw = readFileSync(path, 'utf8').trim()
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch (e) {
+    console.error('[readData] ' + file + ': ' + e.message)
+    return []
+  }
+}
+
+function readObj(file, fallback) {
+  const path = join(DATA, file)
+  try {
+    if (!existsSync(path)) return fallback || {}
+    const raw = readFileSync(path, 'utf8').trim()
+    if (!raw) return fallback || {}
+    const parsed = JSON.parse(raw)
+    return typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : (fallback || {})
+  } catch (e) {
+    console.error('[readObj] ' + file + ': ' + e.message)
+    return fallback || {}
+  }
 }
 
 function writeData(file, data) {
-  writeFileSync(join(DATA, file), JSON.stringify(data, null, 2), 'utf8')
+  try {
+    writeFileSync(join(DATA, file), JSON.stringify(data, null, 2), 'utf8')
+    return true
+  } catch (e) {
+    console.error('[writeData] ' + file + ': ' + e.message)
+    return false
+  }
 }
 
-// ─── SESSIONS EN MÉMOIRE ─────────────────────────────────────────────────────
-// Token simple en mémoire — suffisant pour usage interne
-const SESSIONS = new Map() // token → { user, expires }
-const SESSION_DURATION = 8 * 60 * 60 * 1000 // 8 heures
+function nextId(arr, prefix) {
+  if (!Array.isArray(arr) || arr.length === 0) return prefix + '1'
+  const nums = arr
+    .map(x => parseInt((x.id || '').toString().replace(prefix, '')))
+    .filter(n => !isNaN(n))
+  return prefix + (nums.length ? Math.max(...nums) + 1 : arr.length + 1)
+}
+
+function nowDate() {
+  return new Date().toLocaleDateString('fr-FR')
+}
+
+function nowTime() {
+  return new Date().toLocaleTimeString('fr-FR')
+}
+
+// ============================================================
+// SESSIONS
+// ============================================================
+
+const SESSIONS = new Map()
+const SESSION_TTL = 8 * 60 * 60 * 1000
 
 function createSession(user) {
   const token = randomBytes(32).toString('hex')
   SESSIONS.set(token, {
-    user: { id:user.id, login:user.login, nom:user.nom, prenom:user.prenom,
-      role:user.role, elu_id:user.elu_id||null, secteur:user.secteur||null },
-    expires: Date.now() + SESSION_DURATION
+    user: {
+      id: user.id,
+      login: user.login,
+      nom: user.nom,
+      prenom: user.prenom,
+      role: user.role,
+      elu_id: user.elu_id || null,
+      secteur: user.secteur || null
+    },
+    expires: Date.now() + SESSION_TTL
   })
   return token
 }
 
 function getSession(token) {
-  if (!token) return null
-  const session = SESSIONS.get(token)
-  if (!session) return null
-  if (Date.now() > session.expires) { SESSIONS.delete(token); return null; }
-  return session
+  if (!token || typeof token !== 'string') return null
+  const s = SESSIONS.get(token)
+  if (!s) return null
+  if (Date.now() > s.expires) { SESSIONS.delete(token); return null }
+  return s
 }
 
-// ─── MIDDLEWARE AUTH ──────────────────────────────────────────────────────────
+setInterval(() => {
+  const now = Date.now()
+  for (const [k, s] of SESSIONS.entries()) {
+    if (now > s.expires) SESSIONS.delete(k)
+  }
+}, 60 * 60 * 1000)
+
+// ============================================================
+// LOGS
+// ============================================================
+
+function addLog(user, action, detail) {
+  try {
+    const logs = readData('logs.json')
+    logs.unshift({
+      id: 'L' + Date.now(),
+      date: nowDate(),
+      heure: nowTime(),
+      user_id: user ? user.id : 'system',
+      user_nom: user ? (user.prenom + ' ' + user.nom) : 'Systeme',
+      role: user ? user.role : 'system',
+      action: action || '',
+      detail: detail || ''
+    })
+    writeData('logs.json', logs.slice(0, 500))
+  } catch (e) {
+    console.error('[addLog]', e.message)
+  }
+}
+
+// ============================================================
+// TRACABILITE / AUDIT
+// Enregistre chaque modification avec qui, quoi, quand, pourquoi.
+// ============================================================
+
+const FIELD_LABELS = {
+  nom: 'Nom', prenom: 'Prenom', nud: 'NUD',
+  anc: 'Anciennete (mois)', adultes: 'Adultes', enfants: 'Enfants',
+  compo: 'Composition', typ_v: 'Typ. souhaitee', typ_min: 'Typ. min', typ_max: 'Typ. max',
+  rev: 'Revenu', sit: 'Situation', quartiers: 'Quartiers', secteurs: 'Secteurs',
+  quartier_origine: 'Quartier origine',
+  pmr: 'PMR', rdc: 'RDC requis', violences: 'VIF', handicap: 'Handicap',
+  sans_log: 'Sans logement', expulsion: 'Expulsion', urgence: 'Urgence',
+  suroc: 'Suroccupation', grossesse: 'Grossesse', dalo: 'DALO',
+  mutation: 'Mutation', prio_handicap: 'Prio. handicap', prio_expulsion: 'Prio. expulsion',
+  pieces: 'Dossier complet', statut: 'Statut',
+  ref: 'Reference', bailleur: 'Bailleur', adresse: 'Adresse',
+  quartier: 'Quartier', secteur: 'Secteur', typ: 'Typologie',
+  surface: 'Surface', etage: 'Etage', asc: 'Ascenseur',
+  loyer_hc: 'Loyer HC', charges: 'Charges', loyer: 'Loyer',
+  plafond: 'Plafond', contingent: 'Contingent', dispo: 'Disponibilite',
+  email: 'Email', telephone: 'Telephone'
+}
+
+function fmtVal(v) {
+  if (v === null || v === undefined || v === '') return '-'
+  if (v === true) return 'Oui'
+  if (v === false) return 'Non'
+  if (Array.isArray(v)) return v.length ? v.join(', ') : '-'
+  return String(v)
+}
+
+function diff(before, after, ignore) {
+  const skip = ignore || ['id', 'parcours', 'created_at', 'updated_at']
+  const changes = []
+  const keys = new Set([...Object.keys(before || {}), ...Object.keys(after || {})])
+  for (const k of keys) {
+    if (skip.includes(k)) continue
+    const a = before ? before[k] : undefined
+    const b = after ? after[k] : undefined
+    const eq = JSON.stringify(a) === JSON.stringify(b)
+    if (!eq) changes.push({ champ: k, label: FIELD_LABELS[k] || k, avant: fmtVal(a), apres: fmtVal(b) })
+  }
+  return changes
+}
+
+function addAudit(user, entity_type, entity_id, entity_label, action, changes, motif) {
+  try {
+    const audit = readData('audit.json')
+    audit.unshift({
+      id: 'AU' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+      date: nowDate(),
+      heure: nowTime(),
+      timestamp: new Date().toISOString(),
+      user_id: user ? user.id : 'system',
+      user_nom: user ? (user.prenom + ' ' + user.nom) : 'Systeme',
+      role: user ? user.role : 'system',
+      entity_type: entity_type || '',
+      entity_id: entity_id || '',
+      entity_label: entity_label || '',
+      action: action || '',
+      changes: Array.isArray(changes) ? changes : [],
+      motif: motif || ''
+    })
+    writeData('audit.json', audit.slice(0, 5000))
+  } catch (e) {
+    console.error('[addAudit]', e.message)
+  }
+}
+
+// ============================================================
+// RATE LIMIT
+// ============================================================
+
+const loginAttempts = new Map()
+
+function checkLoginLimit(ip) {
+  const now = Date.now()
+  const window = 15 * 60 * 1000
+  const hits = (loginAttempts.get(ip) || []).filter(t => now - t < window)
+  if (hits.length >= 10) return false
+  hits.push(now)
+  loginAttempts.set(ip, hits)
+  return true
+}
+
+// ============================================================
+// APP
+// ============================================================
+
+const app = express()
+
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+  next()
+})
+
+app.use(cors({ origin: true, credentials: true }))
+app.use(express.json({ limit: '10mb' }))
+
+// Production: servir React
+if (existsSync(join(DIST, 'index.html'))) {
+  const { default: serveStatic } = await import('serve-static').catch(() => ({ default: null }))
+  if (!serveStatic) {
+    app.use(express.static(DIST))
+  } else {
+    app.use(serveStatic(DIST))
+  }
+  console.log('[Logivia] Production - dist servi')
+}
+
+// ============================================================
+// MIDDLEWARES AUTH
+// ============================================================
+
 function requireAuth(req, res, next) {
   const token = req.headers['x-auth-token']
-  const session = getSession(token)
-  if (!session) return res.status(401).json({ error: 'Non connecté' })
-  req.user = session.user
+  const s = getSession(token)
+  if (!s) return res.status(401).json({ error: 'Session expiree. Reconnectez-vous.' })
+  req.user = s.user
   next()
 }
 
 function requireRole(...roles) {
   return (req, res, next) => {
-    if (!roles.includes(req.user?.role))
-      return res.status(403).json({ error: 'Accès refusé' })
+    if (!req.user) return res.status(401).json({ error: 'Non authentifie' })
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Acces refuse' })
+    }
     next()
   }
 }
 
-// ─── LOGS D'ACTIONS ──────────────────────────────────────────────────────────
-function log(user, action, detail = '', type = 'info') {
-  try {
-    const logs = readData('logs.json')
-    logs.unshift({
-      id: 'LOG' + Date.now(),
-      date: new Date().toLocaleDateString('fr-FR'),
-      heure: new Date().toLocaleTimeString('fr-FR'),
-      user_id: user?.id || 'system',
-      user_nom: user ? `${user.prenom} ${user.nom}` : 'Système',
-      role: user?.role || 'system',
-      action,
-      detail,
-      type, // info | warning | error | security
-    })
-    // Garder seulement les 500 derniers logs
-    writeData('logs.json', logs.slice(0, 500))
-  } catch(e) { console.error('Log error:', e) }
-}
+// ============================================================
+// PING - healthcheck
+// ============================================================
 
-// ─── ROUTES AUTH ─────────────────────────────────────────────────────────────
+app.get('/api/ping', (req, res) => {
+  res.json({
+    ok: true,
+    version: '3.1',
+    nom: 'Logivia',
+    temps_reel: true,
+    data_dir_mode: process.env.DATA_DIR ? 'volume' : 'ephemere',
+    time: new Date().toISOString()
+  })
+})
 
-// Login
+// ============================================================
+// AUTH
+// ============================================================
+
 app.post('/api/auth/login', (req, res) => {
-  const { login, password } = req.body
-  if (!login || !password)
+  const ip = req.ip || 'unknown'
+  if (!checkLoginLimit(ip)) {
+    return res.status(429).json({ error: 'Trop de tentatives. Attendez 15 minutes.' })
+  }
+
+  const { login, password } = req.body || {}
+  if (!login || !password || typeof login !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ error: 'Login et mot de passe requis' })
+  }
 
   const users = readData('users.json')
-  const user = users.find(u => u.login === login && u.password === password && u.actif)
+  const user = users.find(u =>
+    u.login === login.trim() &&
+    u.password === password &&
+    u.actif === true
+  )
 
   if (!user) {
-    log(null, 'LOGIN_ECHEC', `Tentative échouée pour : ${login}`, 'security')
+    addLog(null, 'LOGIN_ECHEC', 'login: ' + login + ' ip: ' + ip)
     return res.status(401).json({ error: 'Identifiants incorrects' })
   }
 
   const token = createSession(user)
-  log(user, 'LOGIN', `Connexion depuis ${req.ip}`, 'info')
+  addLog(user, 'LOGIN', 'ip: ' + ip)
+
   res.json({
     token,
-    user: { id:user.id, login:user.login, nom:user.nom, prenom:user.prenom,
-      role:user.role, elu_id:user.elu_id||null, secteur:user.secteur||null }
+    user: {
+      id: user.id,
+      login: user.login,
+      nom: user.nom,
+      prenom: user.prenom,
+      role: user.role,
+      elu_id: user.elu_id || null,
+      secteur: user.secteur || null
+    }
   })
 })
 
-// Vérifier session
 app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: req.user })
 })
 
-// Logout
 app.post('/api/auth/logout', requireAuth, (req, res) => {
-  const token = req.headers['x-auth-token']
-  log(req.user, 'LOGOUT', '', 'info')
-  SESSIONS.delete(token)
+  SESSIONS.delete(req.headers['x-auth-token'])
   res.json({ ok: true })
 })
 
-// Changer son mot de passe
 app.post('/api/auth/change-password', requireAuth, (req, res) => {
-  const { ancien, nouveau } = req.body
+  const { ancien, nouveau } = req.body || {}
+  if (!ancien || !nouveau) return res.status(400).json({ error: 'Champs manquants' })
+
   const users = readData('users.json')
   const idx = users.findIndex(u => u.id === req.user.id)
-  if (idx === -1) return res.status(404).json({ error: 'Utilisateur non trouvé' })
+  if (idx === -1) return res.status(404).json({ error: 'Utilisateur introuvable' })
   if (users[idx].password !== ancien) return res.status(400).json({ error: 'Ancien mot de passe incorrect' })
+
   users[idx].password = nouveau
   writeData('users.json', users)
-  log(req.user, 'CHANGE_PASSWORD', '', 'security')
+  addLog(req.user, 'CHANGE_PASSWORD', '')
   res.json({ ok: true })
 })
 
-// ─── GESTION UTILISATEURS (directeur seulement) ───────────────────────────────
+// ============================================================
+// UTILISATEURS
+// ============================================================
+
 app.get('/api/users', requireAuth, requireRole('directeur'), (req, res) => {
   const users = readData('users.json')
-  res.json(users.map(u => ({ ...u, password: '***' }))) // ne jamais renvoyer les mdp
+  res.json(users.map(u => ({ ...u, password: '***' })))
 })
 
 app.post('/api/users', requireAuth, requireRole('directeur'), (req, res) => {
   const users = readData('users.json')
-  const newUser = {
-    id: 'U' + (users.length + 1),
-    ...req.body,
-    created_at: new Date().toLocaleDateString('fr-FR'),
-    actif: true,
+  const u = {
+    id: nextId(users, 'U'),
+    login: req.body.login,
+    password: req.body.password || 'changeme',
+    nom: req.body.nom || '',
+    prenom: req.body.prenom || '',
+    role: req.body.role || 'agent',
+    elu_id: req.body.elu_id || null,
+    secteur: req.body.secteur || null,
+    actif: true
   }
-  users.push(newUser)
+  users.push(u)
   writeData('users.json', users)
-  log(req.user, 'CREATE_USER', `Créé : ${newUser.login} (${newUser.role})`, 'info')
-  res.status(201).json({ ...newUser, password: '***' })
+  addLog(req.user, 'CREATE_USER', u.login)
+  res.status(201).json({ ...u, password: '***' })
 })
 
 app.put('/api/users/:id', requireAuth, requireRole('directeur'), (req, res) => {
   const users = readData('users.json')
   const idx = users.findIndex(u => u.id === req.params.id)
-  if (idx === -1) return res.status(404).json({ error: 'Non trouvé' })
-  users[idx] = { ...users[idx], ...req.body, id: users[idx].id }
+  if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
+  const keep = { id: users[idx].id, password: users[idx].password }
+  users[idx] = { ...users[idx], ...req.body, ...keep }
   writeData('users.json', users)
-  log(req.user, 'UPDATE_USER', `Modifié : ${users[idx].login}`, 'info')
+  addLog(req.user, 'UPDATE_USER', users[idx].login)
   res.json({ ...users[idx], password: '***' })
 })
 
-// ─── ROUTE LOGS ──────────────────────────────────────────────────────────────
-app.get('/api/logs', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
-  const logs = readData('logs.json')
-  const { user_id, action, type, limit = 100 } = req.query
-  let result = logs
-  if (user_id) result = result.filter(l => l.user_id === user_id)
-  if (action) result = result.filter(l => l.action.includes(action))
-  if (type) result = result.filter(l => l.type === type)
-  res.json(result.slice(0, parseInt(limit)))
+// ============================================================
+// REFERENTIELS + ELUS
+// ============================================================
+
+app.get('/api/referentiels', requireAuth, (req, res) => {
+  const ref = readObj('referentiels.json', {})
+  res.json(ref)
 })
 
-// ─── DECISIONS CAL ───────────────────────────────────────────────────────────
-app.get('/api/decisions-cal', requireAuth, (req, res) => {
-  const decisions = readData('decisions_cal.json')
-  const { logement_id, date_cal } = req.query
-  let result = decisions
-  if (logement_id) result = result.filter(d => d.logement_id === logement_id)
-  if (date_cal) result = result.filter(d => d.date_cal === date_cal)
-  res.json(result)
+app.get('/api/elus', requireAuth, (req, res) => {
+  const ref = readObj('referentiels.json', { elus: [] })
+  res.json(ref.elus || [])
 })
 
-app.post('/api/decisions-cal', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
-  const { logement_id, logement_ref, logement_adresse, date_cal, candidats, observations } = req.body
+app.post('/api/elus', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+  const ref = readObj('referentiels.json', { elus: [] })
+  if (!ref.elus) ref.elus = []
+  const elu = {
+    id: 'E' + Date.now(),
+    nom: req.body.nom || '',
+    prenom: req.body.prenom || '',
+    secteur: req.body.secteur || '',
+    quartiers: req.body.quartiers || [],
+    email: req.body.email || '',
+    telephone: req.body.telephone || '',
+    actif: true
+  }
+  ref.elus.push(elu)
+  writeData('referentiels.json', ref)
+  addLog(req.user, 'CREATE_ELU', elu.nom)
+  res.status(201).json(elu)
+})
+
+app.put('/api/elus/:id', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+  const ref = readObj('referentiels.json', { elus: [] })
+  if (!ref.elus) ref.elus = []
+  const idx = ref.elus.findIndex(e => e.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
+
+  const { __motif, ...patch } = req.body || {}
+  const before = { ...ref.elus[idx] }
+  const after = { ...ref.elus[idx], ...patch, id: ref.elus[idx].id }
+  const changes = diff(before, after)
+
+  ref.elus[idx] = after
+  writeData('referentiels.json', ref)
+  addLog(req.user, 'UPDATE_ELU', ref.elus[idx].nom + (__motif ? ' - ' + __motif : ''))
+  if (changes.length > 0) {
+    addAudit(req.user, 'elu', ref.elus[idx].id, ref.elus[idx].nom, 'modification', changes, __motif || '')
+  }
+  res.json(ref.elus[idx])
+})
+
+// ============================================================
+// VUE ENRICHIE ELU : audiences + parcours candidats
+// ============================================================
+
+app.get('/api/elus/:id/full', requireAuth, (req, res) => {
+  const ref = readObj('referentiels.json', { elus: [] })
+  const elu = (ref.elus || []).find(e => e.id === req.params.id)
+  if (!elu) return res.status(404).json({ error: 'Elu non trouve' })
+
+  const audiences = readData('audiences.json').filter(a => a.elu_id === elu.id)
+  const demandeurs = readData('demandeurs.json')
   const decisions = readData('decisions_cal.json')
 
-  // Une seule décision par logement par séance
-  const existing = decisions.findIndex(d =>
-    d.logement_id === logement_id && d.date_cal === date_cal
-  )
-
-  const decision = {
-    id: 'CAL' + Date.now(),
-    logement_id,
-    logement_ref,
-    logement_adresse,
-    date_cal: date_cal || new Date().toLocaleDateString('fr-FR'),
-    candidats, // [{ dem_id, nom, prenom, rang, decision, motif, score }]
-    observations: observations || '',
-    agent_id: req.user.id,
-    agent_nom: `${req.user.prenom} ${req.user.nom}`,
-    created_at: new Date().toISOString(),
-    statut: 'validée',
-  }
-
-  if (existing >= 0) {
-    decisions[existing] = { ...decisions[existing], ...decision, id: decisions[existing].id }
-  } else {
-    decisions.unshift(decision)
-  }
-
-  writeData('decisions_cal.json', decisions)
-
-  // Mettre à jour le statut des audiences liées
-  const audiences = readData('audiences.json')
-  const attribue = candidats?.find(c => c.decision?.includes('Retenu rang 1'))
-  if (attribue) {
-    const audIdx = audiences.findIndex(a => a.dem_id === attribue.dem_id)
-    if (audIdx >= 0) {
-      audiences[audIdx].statut = 'Attribué'
-      audiences[audIdx].quartier_attribue = logement_adresse
-      writeData('audiences.json', audiences)
+  // Pour chaque audience : statut actuel du candidat
+  const details = audiences.map(a => {
+    const dem = demandeurs.find(d => d.id === a.dem_id)
+    const decs = decisions.filter(dc => (dc.candidats || []).some(c => c.dem_id === a.dem_id))
+    const derniere = decs[0]
+    return {
+      audience: a,
+      demandeur: dem ? {
+        id: dem.id, nud: dem.nud, nom: dem.nom, prenom: dem.prenom,
+        statut: dem.statut, compo: dem.compo, anc: dem.anc, rev: dem.rev,
+        typ_v: dem.typ_v, quartiers: dem.quartiers || [],
+        dalo: !!dem.dalo, violences: !!dem.violences, sans_log: !!dem.sans_log,
+        pieces: !!dem.pieces, parcours: dem.parcours || []
+      } : null,
+      derniere_decision: derniere ? {
+        date: derniere.date_cal,
+        logement: derniere.logement_ref + ' - ' + derniere.logement_adresse,
+        decision: (derniere.candidats.find(c => c.dem_id === a.dem_id) || {}).decision || ''
+      } : null,
+      attribue: !!dem && dem.statut === 'attribue'
     }
+  })
+
+  // Migration territoriale : quartier origine -> quartier attribue
+  const migrations = details
+    .filter(d => d.audience.quartier_origine && d.audience.quartier_attribue)
+    .map(d => ({
+      demandeur: d.demandeur ? (d.demandeur.nom + ' ' + d.demandeur.prenom) : '?',
+      de: d.audience.quartier_origine,
+      vers: d.audience.quartier_attribue,
+      date: d.audience.date_audience
+    }))
+
+  res.json({
+    elu,
+    details,
+    migrations,
+    stats: {
+      nb_audiences: audiences.length,
+      nb_favorables: audiences.filter(a => a.favorable).length,
+      nb_attribues: details.filter(d => d.attribue).length,
+      nb_en_cours: details.filter(d => !d.attribue && d.demandeur && d.demandeur.statut === 'active').length
+    }
+  })
+})
+
+app.delete('/api/elus/:id', requireAuth, requireRole('directeur'), (req, res) => {
+  const ref = readObj('referentiels.json', { elus: [] })
+  if (!ref.elus) ref.elus = []
+  const idx = ref.elus.findIndex(e => e.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
+  // Archive plutot que suppression
+  ref.elus[idx].actif = false
+  writeData('referentiels.json', ref)
+  addLog(req.user, 'ARCHIVE_ELU', ref.elus[idx].nom)
+  res.json({ ok: true })
+})
+
+// ============================================================
+// DASHBOARD
+// ============================================================
+
+app.get('/api/dashboard', requireAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const logements = readData('logements.json')
+  const audiences = readData('audiences.json')
+  const notifications = readData('notifications.json')
+
+  const actifs = demandeurs.filter(d => d.statut === 'active')
+  const vacants = logements.filter(l => !l.statut || l.statut === 'vacant')
+  const urgents = actifs.filter(d => d.dalo || d.prio_expulsion || d.sans_log || d.violences)
+  const attribues = audiences.filter(a => a.statut === 'Attribue')
+
+  const avecDelai = attribues.filter(a => a.jours_total)
+  const delaiMoyen = avecDelai.length
+    ? Math.round(avecDelai.reduce((s, a) => s + a.jours_total, 0) / avecDelai.length)
+    : null
+
+  const parQuartier = {}
+  actifs.forEach(d => {
+    (d.quartiers || []).forEach(q => {
+      parQuartier[q] = (parQuartier[q] || 0) + 1
+    })
+  })
+
+  const parTyp = {
+    T1: actifs.filter(d => d.typ_v === 'T1').length,
+    T2: actifs.filter(d => d.typ_v === 'T2').length,
+    T3: actifs.filter(d => d.typ_v === 'T3').length,
+    'T4+': actifs.filter(d => ['T4', 'T5', 'T6'].includes(d.typ_v)).length
   }
 
-  log(req.user, 'DECISION_CAL',
-    `Logement ${logement_ref} · ${candidats?.length} candidats · rang 1 : ${candidats?.find(c=>c.rang===1)?.nom||'—'}`,
-    'info')
-
-  res.status(201).json(decision)
+  res.json({
+    nb_demandeurs_actifs: actifs.length,
+    nb_logements_disponibles: vacants.length,
+    nb_urgents: urgents.length,
+    nb_incomplets: actifs.filter(d => !d.pieces).length,
+    nb_audiences: audiences.length,
+    nb_audiences_favorables: audiences.filter(a => a.favorable).length,
+    nb_attribues: attribues.length,
+    nb_notifications_non_lues: notifications.filter(n => !n.lu).length,
+    delai_moyen: delaiMoyen,
+    tension_par_quartier: Object.entries(parQuartier)
+      .sort((a, b) => b[1] - a[1])
+      .map(([quartier, nb]) => ({ quartier, nb })),
+    tension_par_typ: parTyp
+  })
 })
 
-// Historique CAL d'un demandeur
-app.get('/api/decisions-cal/demandeur/:dem_id', requireAuth, (req, res) => {
-  const decisions = readData('decisions_cal.json')
-  const result = decisions.filter(d =>
-    d.candidats?.some(c => c.dem_id === req.params.dem_id)
-  ).map(d => ({
-    ...d,
-    candidat: d.candidats.find(c => c.dem_id === req.params.dem_id)
-  }))
-  res.json(result)
+// ============================================================
+// DEMANDEURS
+// Statuts : active | attribue | archive | annule
+// ============================================================
+
+app.get('/api/demandeurs', requireAuth, (req, res) => {
+  let d = readData('demandeurs.json')
+  const { statut, search } = req.query
+  if (statut) d = d.filter(x => x.statut === statut)
+  else d = d.filter(x => !x.statut || x.statut !== 'archive')
+  if (search) {
+    const q = search.toLowerCase()
+    d = d.filter(x => (x.nom + ' ' + x.prenom + ' ' + (x.nud || '')).toLowerCase().includes(q))
+  }
+  res.json(d)
 })
 
-// ─── SCORING ENGINE (miroir du front) ─────────────────────────────────────────
+app.get('/api/demandeurs/:id', requireAuth, (req, res) => {
+  const d = readData('demandeurs.json')
+  const item = d.find(x => x.id === req.params.id)
+  if (!item) return res.status(404).json({ error: 'Non trouve' })
+  res.json(item)
+})
 
-const TYP = ['T1','T2','T3','T4','T5','T6']
+app.post('/api/demandeurs', requireAuth, (req, res) => {
+  const d = readData('demandeurs.json')
+  const item = {
+    id: nextId(d, 'D'),
+    nud: req.body.nud || '',
+    nom: req.body.nom || '',
+    prenom: req.body.prenom || '',
+    anc: parseInt(req.body.anc) || 0,
+    adultes: parseInt(req.body.adultes) || 1,
+    enfants: parseInt(req.body.enfants) || 0,
+    compo: req.body.compo || '',
+    typ_v: req.body.typ_v || 'T3',
+    typ_min: req.body.typ_min || 'T2',
+    typ_max: req.body.typ_max || 'T4',
+    secteurs: req.body.secteurs || [],
+    quartiers: req.body.quartiers || [],
+    rev: parseFloat(req.body.rev) || 0,
+    sit: req.body.sit || '',
+    quartier_origine: req.body.quartier_origine || '',
+    pmr: !!req.body.pmr,
+    rdc: !!req.body.rdc,
+    violences: !!req.body.violences,
+    handicap: !!req.body.handicap,
+    sans_log: !!req.body.sans_log,
+    expulsion: !!req.body.expulsion,
+    urgence: !!req.body.urgence,
+    suroc: !!req.body.suroc,
+    grossesse: !!req.body.grossesse,
+    dalo: !!req.body.dalo,
+    mutation: !!req.body.mutation,
+    prio_handicap: !!req.body.prio_handicap,
+    prio_expulsion: !!req.body.prio_expulsion,
+    pieces: !!req.body.pieces,
+    statut: 'active',
+    parcours: [{ date: nowDate(), type: 'Demande creee', detail: 'Saisie manuelle' }]
+  }
+  d.push(item)
+  writeData('demandeurs.json', d)
+  addLog(req.user, 'CREATE_DEMANDEUR', item.nom + ' ' + item.prenom)
+  res.status(201).json(item)
+})
+
+app.put('/api/demandeurs/:id', requireAuth, (req, res) => {
+  const d = readData('demandeurs.json')
+  const idx = d.findIndex(x => x.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
+
+  const { __motif, ...patch } = req.body || {}
+  const before = { ...d[idx] }
+  const after = { ...d[idx], ...patch, id: d[idx].id, parcours: d[idx].parcours }
+
+  const changes = diff(before, after)
+
+  // Motif obligatoire si modif metier (plus que juste un changement de statut simple)
+  const isSimpleStatutChange = changes.length === 1 && changes[0].champ === 'statut'
+  if (!isSimpleStatutChange && changes.length > 0 && !__motif) {
+    return res.status(400).json({ error: 'Motif de modification obligatoire', need_motif: true, preview: changes })
+  }
+
+  // Enrichir le parcours d'une trace visible dans la timeline
+  if (changes.length > 0) {
+    if (!after.parcours) after.parcours = []
+    after.parcours.push({
+      date: nowDate(),
+      type: 'Modification fiche',
+      detail: (__motif || 'mise a jour') + ' (' + changes.length + ' champ' + (changes.length > 1 ? 's' : '') + ') - par ' + req.user.prenom + ' ' + req.user.nom
+    })
+  }
+
+  d[idx] = after
+  writeData('demandeurs.json', d)
+  addLog(req.user, 'UPDATE_DEMANDEUR', d[idx].nom + ' ' + d[idx].prenom + (__motif ? ' - ' + __motif : ''))
+  if (changes.length > 0) {
+    addAudit(req.user, 'demandeur', d[idx].id, d[idx].nom + ' ' + d[idx].prenom, 'modification', changes, __motif || '')
+  }
+  res.json(d[idx])
+})
+
+// Archive (pas de vrai delete)
+app.delete('/api/demandeurs/:id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const d = readData('demandeurs.json')
+  const idx = d.findIndex(x => x.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
+  const motif = (req.body && req.body.__motif) || (req.query && req.query.motif) || ''
+  d[idx].statut = 'archive'
+  writeData('demandeurs.json', d)
+  addLog(req.user, 'ARCHIVE_DEMANDEUR', d[idx].nom + ' ' + d[idx].prenom + (motif ? ' - ' + motif : ''))
+  addAudit(req.user, 'demandeur', d[idx].id, d[idx].nom + ' ' + d[idx].prenom, 'archivage', [{ champ: 'statut', label: 'Statut', avant: 'actif', apres: 'archive' }], motif)
+  res.json({ ok: true })
+})
+
+// ============================================================
+// LOGEMENTS
+// Statuts : vacant | attribue | archive
+// ============================================================
+
+app.get('/api/logements', requireAuth, (req, res) => {
+  let l = readData('logements.json')
+  l = l.filter(x => !x.statut || x.statut === 'vacant')
+  res.json(l)
+})
+
+app.get('/api/logements/:id', requireAuth, (req, res) => {
+  const l = readData('logements.json')
+  const item = l.find(x => x.id === req.params.id)
+  if (!item) return res.status(404).json({ error: 'Non trouve' })
+  res.json(item)
+})
+
+app.post('/api/logements', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const l = readData('logements.json')
+  const lhc = parseFloat(req.body.loyer_hc) || 0
+  const ch = parseFloat(req.body.charges) || 0
+  const item = {
+    id: nextId(l, 'L'),
+    ref: req.body.ref || '',
+    bailleur: req.body.bailleur || '',
+    adresse: req.body.adresse || '',
+    quartier: req.body.quartier || '',
+    secteur: req.body.secteur || '',
+    typ: req.body.typ || 'T3',
+    surface: parseFloat(req.body.surface) || 0,
+    etage: parseInt(req.body.etage) || 0,
+    asc: !!req.body.asc,
+    rdc: !!req.body.rdc,
+    pmr: !!req.body.pmr,
+    loyer_hc: lhc,
+    charges: ch,
+    loyer: parseFloat(req.body.loyer) || (lhc + ch),
+    plafond: req.body.plafond || 'PLUS',
+    contingent: req.body.contingent || 'Ville',
+    dispo: req.body.dispo || '',
+    statut: 'vacant'
+  }
+  l.push(item)
+  writeData('logements.json', l)
+  addLog(req.user, 'CREATE_LOGEMENT', item.adresse)
+  res.status(201).json(item)
+})
+
+app.put('/api/logements/:id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const l = readData('logements.json')
+  const idx = l.findIndex(x => x.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
+
+  const { __motif, ...patch } = req.body || {}
+  const before = { ...l[idx] }
+  const after = { ...l[idx], ...patch, id: l[idx].id }
+  // Si le loyer total n a pas ete envoye, le recalculer
+  if (patch.loyer_hc !== undefined || patch.charges !== undefined) {
+    after.loyer = (parseFloat(after.loyer_hc) || 0) + (parseFloat(after.charges) || 0)
+  }
+  const changes = diff(before, after)
+
+  if (changes.length > 0 && !__motif) {
+    return res.status(400).json({ error: 'Motif de modification obligatoire', need_motif: true, preview: changes })
+  }
+
+  l[idx] = after
+  writeData('logements.json', l)
+  addLog(req.user, 'UPDATE_LOGEMENT', l[idx].adresse + (__motif ? ' - ' + __motif : ''))
+  if (changes.length > 0) {
+    addAudit(req.user, 'logement', l[idx].id, l[idx].ref + ' - ' + l[idx].adresse, 'modification', changes, __motif || '')
+  }
+  res.json(l[idx])
+})
+
+app.delete('/api/logements/:id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const l = readData('logements.json')
+  const idx = l.findIndex(x => x.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
+  const motif = (req.body && req.body.__motif) || (req.query && req.query.motif) || ''
+  l[idx].statut = 'archive'
+  writeData('logements.json', l)
+  addLog(req.user, 'ARCHIVE_LOGEMENT', l[idx].adresse + (motif ? ' - ' + motif : ''))
+  addAudit(req.user, 'logement', l[idx].id, l[idx].ref + ' - ' + l[idx].adresse, 'archivage', [{ champ: 'statut', label: 'Statut', avant: 'vacant', apres: 'archive' }], motif)
+  res.json({ ok: true })
+})
+
+// ============================================================
+// SCORING
+// ============================================================
+
+const TYP = ['T1', 'T2', 'T3', 'T4', 'T5', 'T6']
 const ti = t => TYP.indexOf(t)
 const inRange = (t, mn, mx) => ti(t) >= ti(mn) && ti(t) <= ti(mx)
 
 function computeScore(dem, log, biais) {
+  const b = biais || {}
   const excl = []
   if (dem.statut !== 'active') excl.push('Demande non active')
-  if (!inRange(log.typ, dem.typ_min, dem.typ_max)) excl.push('Typologie incompatible')
-  if (dem.pmr && !log.pmr) excl.push('PMR requis — logement non adapté')
-  if (dem.rdc && !log.rdc) excl.push('RDC requis — non disponible')
-  const te = log.loyer / dem.rev * 100
-  if (te > 40) excl.push(`Taux d'effort ${te.toFixed(0)}% trop élevé`)
-  if (excl.length) return { eligible: false, excl, total: 0, te: te.toFixed(1), scores: {}, biais: {} }
+  if (!inRange(log.typ, dem.typ_min || 'T1', dem.typ_max || 'T6')) excl.push('Typologie incompatible')
+  if (dem.pmr && !log.pmr) excl.push('PMR requis non disponible')
+  if (dem.rdc && !log.rdc) excl.push('RDC requis non disponible')
+
+  const rev = parseFloat(dem.rev) || 1
+  const loyer = parseFloat(log.loyer) || 0
+  const te = loyer / rev * 100
+  if (te > 40) excl.push('Taux effort ' + te.toFixed(0) + '% trop eleve')
+
+  if (excl.length > 0) return { eligible: false, excl, total: 0, te: te.toFixed(1), scores: {}, bonus_malus: [] }
 
   const sTyp = log.typ === dem.typ_v ? 20 : 15
-  const np = dem.adultes + dem.enfants, idx = ti(log.typ)
-  const sComp = np>=idx&&np<=idx+2?15:np===idx-1||np===idx+3?10:np===idx+4?5:0
-  const sTaux = te<=25?20:te<=30?16:te<=35?10:te<=40?5:0
-  const sAnc = dem.anc>=36?10:dem.anc>=24?8:dem.anc>=12?5:dem.anc>=6?3:1
+  const np = (parseInt(dem.adultes) || 0) + (parseInt(dem.enfants) || 0)
+  const idx = ti(log.typ)
+  let sComp = 0
+  if (np >= idx && np <= idx + 2) sComp = 15
+  else if (np === idx - 1 || np === idx + 3) sComp = 10
+  else if (np === idx + 4) sComp = 5
+
+  let sTaux = 0
+  if (te <= 25) sTaux = 20
+  else if (te <= 30) sTaux = 16
+  else if (te <= 35) sTaux = 10
+  else sTaux = 5
+
+  const anc = parseInt(dem.anc) || 0
+  const sAnc = anc >= 36 ? 10 : anc >= 24 ? 8 : anc >= 12 ? 5 : anc >= 6 ? 3 : 1
+
   let sUrg = 0
-  if(dem.sans_log)sUrg+=6; if(dem.violences)sUrg+=5; if(dem.handicap)sUrg+=4
-  if(dem.expulsion)sUrg+=5; if(dem.suroc)sUrg+=4; if(dem.grossesse)sUrg+=3
-  if(dem.urgence&&sUrg<4)sUrg+=3; sUrg=Math.min(sUrg,15)
-  const sLoc = dem.quartiers.includes(log.quartier)?10:dem.secteurs.includes(log.secteur)?8:2
-  const sPrio = (dem.dalo||dem.prio_expulsion)?5:(dem.mutation||dem.prio_handicap)?3:0
+  if (dem.sans_log) sUrg += 6
+  if (dem.violences) sUrg += 5
+  if (dem.handicap) sUrg += 4
+  if (dem.expulsion) sUrg += 5
+  if (dem.suroc) sUrg += 4
+  if (dem.grossesse) sUrg += 3
+  if (dem.urgence && sUrg < 4) sUrg += 3
+  sUrg = Math.min(sUrg, 15)
+
+  const quartiers = dem.quartiers || []
+  const secteurs = dem.secteurs || []
+  const sLoc = quartiers.includes(log.quartier) ? 10 : secteurs.includes(log.secteur) ? 8 : 2
+  const sPrio = (dem.dalo || dem.prio_expulsion) ? 5 : (dem.mutation || dem.prio_handicap) ? 3 : 0
   const sDos = dem.pieces ? 5 : 1
-  const base = sTyp+sComp+sTaux+sAnc+sUrg+sLoc+sPrio+sDos
 
-  // Anti-biais
-  const hb = biais[dem.id] || { nb_presentations:0, nb_refus_non_motives:0, derniere_proposition_mois:null }
-  let bBonus=0, bMalus=0, bAlerts=[]
-  if(hb.nb_presentations===0){ bBonus+=5; bAlerts.push({type:'bonus',msg:'Jamais présenté en CAL (+5)'}) }
-  if(hb.derniere_proposition_mois!==null&&hb.derniere_proposition_mois<2){
-    bMalus+=5; bAlerts.push({type:'malus',msg:'Proposition il y a moins de 2 mois (−5)'})
-  }
-  if(hb.nb_refus_non_motives>=2){ bMalus+=8; bAlerts.push({type:'malus',msg:`${hb.nb_refus_non_motives} refus non motivés (−8)`}) }
-  else if(hb.nb_refus_non_motives===1){ bMalus+=3; bAlerts.push({type:'malus',msg:'1 refus non motivé (−3)'}) }
-  if(hb.nb_presentations>=3){ bBonus+=4; bAlerts.push({type:'bonus',msg:'3+ présentations sans attribution (+4)'}) }
+  const base = sTyp + sComp + sTaux + sAnc + sUrg + sLoc + sPrio + sDos
+  const hb = b[dem.id] || { nb_presentations: 0, nb_refus_non_motives: 0, derniere_proposition_mois: null }
 
-  const total = Math.min(Math.max(base+bBonus-bMalus, 0), 100)
+  let bonus = 0; let malus = 0
+  const bm = []
+
+  if (hb.nb_presentations === 0) { bonus += 5; bm.push({ type: 'bonus', msg: 'Jamais presente en CAL (+5)' }) }
+  if (hb.derniere_proposition_mois !== null && hb.derniere_proposition_mois < 2) { malus += 5; bm.push({ type: 'malus', msg: 'Proposition recente (-5)' }) }
+  if (hb.nb_refus_non_motives >= 2) { malus += 8; bm.push({ type: 'malus', msg: hb.nb_refus_non_motives + ' refus non motives (-8)' }) }
+  else if (hb.nb_refus_non_motives === 1) { malus += 3; bm.push({ type: 'malus', msg: '1 refus non motive (-3)' }) }
+  if (hb.nb_presentations >= 3) { bonus += 4; bm.push({ type: 'bonus', msg: '3+ presentations (+4)' }) }
+
+  const total = Math.min(Math.max(base + bonus - malus, 0), 100)
+
   return {
-    eligible: true, excl: [], total, te: te.toFixed(1), base,
-    scores: { typ:sTyp, comp:sComp, taux:sTaux, anc:sAnc, urg:sUrg, loc:sLoc, prio:sPrio, dos:sDos },
-    biais: { bonus:bBonus, malus:bMalus, alerts:bAlerts }
+    eligible: true,
+    excl: [],
+    total,
+    te: te.toFixed(1),
+    base,
+    scores: { typ: sTyp, comp: sComp, taux: sTaux, anc: sAnc, urg: sUrg, loc: sLoc, prio: sPrio, dos: sDos },
+    bonus_malus: bm
   }
 }
 
-// ─── ROUTES : DEMANDEURS ──────────────────────────────────────────────────────
+// ============================================================
+// MATCHING
+// ============================================================
 
-app.get('/api/demandeurs', (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const { statut, search } = req.query
-  let result = demandeurs
-  if (statut) result = result.filter(d => d.statut === statut)
-  if (search) {
-    const q = search.toLowerCase()
-    result = result.filter(d =>
-      `${d.nom} ${d.prenom} ${d.nud}`.toLowerCase().includes(q))
-  }
-  res.json(result)
-})
-
-app.get('/api/demandeurs/:id', (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const d = demandeurs.find(d => d.id === req.params.id)
-  if (!d) return res.status(404).json({ error: 'Demandeur non trouvé' })
-  res.json(d)
-})
-
-app.post('/api/demandeurs', (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const newId = 'D' + (demandeurs.length + 1)
-  const dem = { id: newId, ...req.body, statut: 'active',
-    parcours: [{ date: new Date().toLocaleDateString('fr-FR'), type: 'Demande créée', detail: 'Saisie manuelle' }] }
-  demandeurs.push(dem)
-  writeData('demandeurs.json', demandeurs)
-  res.status(201).json(dem)
-})
-
-app.put('/api/demandeurs/:id', (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const idx = demandeurs.findIndex(d => d.id === req.params.id)
-  if (idx === -1) return res.status(404).json({ error: 'Non trouvé' })
-  demandeurs[idx] = { ...demandeurs[idx], ...req.body }
-  writeData('demandeurs.json', demandeurs)
-  res.json(demandeurs[idx])
-})
-
-// ─── ROUTES : LOGEMENTS ───────────────────────────────────────────────────────
-
-app.get('/api/logements', (req, res) => {
-  const logements = readData('logements.json')
-  res.json(logements)
-})
-
-app.get('/api/logements/:id', (req, res) => {
-  const logements = readData('logements.json')
-  const l = logements.find(l => l.id === req.params.id)
-  if (!l) return res.status(404).json({ error: 'Logement non trouvé' })
-  res.json(l)
-})
-
-app.post('/api/logements', (req, res) => {
-  const logements = readData('logements.json')
-  const newId = 'L' + (logements.length + 1)
-  const log = { id: newId, ...req.body }
-  logements.push(log)
-  writeData('logements.json', logements)
-  res.status(201).json(log)
-})
-
-app.put('/api/logements/:id', (req, res) => {
-  const logements = readData('logements.json')
-  const idx = logements.findIndex(l => l.id === req.params.id)
-  if (idx === -1) return res.status(404).json({ error: 'Non trouvé' })
-  logements[idx] = { ...logements[idx], ...req.body }
-  writeData('logements.json', logements)
-  res.json(logements[idx])
-})
-
-// ─── ROUTES : MATCHING ────────────────────────────────────────────────────────
-
-app.get('/api/matching/:logement_id', (req, res) => {
+app.get('/api/matching/:logement_id', requireAuth, (req, res) => {
   const logements = readData('logements.json')
   const demandeurs = readData('demandeurs.json')
-  const ref = readData('referentiels.json')
+  const ref = readObj('referentiels.json', {})
+  const biais = ref.historique_biais || {}
 
   const log = logements.find(l => l.id === req.params.logement_id)
-  if (!log) return res.status(404).json({ error: 'Logement non trouvé' })
+  if (!log) return res.status(404).json({ error: 'Logement non trouve' })
 
-  const results = demandeurs.map(dem => ({
-    dem,
-    res: computeScore(dem, log, ref.historique_biais)
-  }))
+  const actifs = demandeurs.filter(d => d.statut === 'active')
+  const results = actifs.map(dem => ({ dem, res: computeScore(dem, log, biais) }))
 
   const eligible = results
     .filter(x => x.res.eligible)
     .sort((a, b) => b.res.total - a.res.total)
     .map((x, i) => ({ ...x, rang: i + 1, top4: i < 4 }))
 
-  const ineligible = results
-    .filter(x => !x.res.eligible)
+  const ineligible = results.filter(x => !x.res.eligible)
+
+  const audiences = readData('audiences.json')
+
+  addLog(req.user, 'MATCHING', 'Logement ' + log.ref + ' - ' + eligible.length + ' eligibles')
 
   res.json({
     logement: log,
@@ -429,247 +940,573 @@ app.get('/api/matching/:logement_id', (req, res) => {
       nb_eligible: eligible.length,
       nb_ineligible: ineligible.length,
       nb_avec_audience: eligible.filter(x =>
-        readData('audiences.json').some(a => a.dem_id === x.dem.id && a.favorable)
+        audiences.some(a => a.dem_id === x.dem.id && a.favorable)
       ).length
     }
   })
 })
 
-// ─── ROUTE : MATCHING CANDIDAT ────────────────────────────────────────────────
-// Trouve un demandeur existant à partir de NUD / Nom+Prénom+DDN / Nom+Prénom
-// Utilisé par l'import Pelehas pour lier les audiences aux bons demandeurs
+// ============================================================
+// AUDIENCES
+// Statuts : En attente proposition | En attente attribution | Attribue | Cloture
+// ============================================================
 
-app.post('/api/match-candidat', (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const { nud, nom, prenom, date_naissance } = req.body
-
-  const normalize = (s) => (s || '').toLowerCase().trim()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // enlève accents
-    .replace(/[-']/g, ' ').replace(/\s+/g, ' ')
-
-  let match = null
-  let niveau = null
-  let confiance = null
-
-  // Niveau 1 — NUD exact
-  if (nud && nud.trim()) {
-    match = demandeurs.find(d => d.nud && d.nud.trim() === nud.trim())
-    if (match) { niveau = 1; confiance = 'certain'; }
+app.get('/api/audiences', requireAuth, (req, res) => {
+  let a = readData('audiences.json')
+  const { elu_id, dem_id, statut } = req.query
+  if (elu_id) a = a.filter(x => x.elu_id === elu_id)
+  if (dem_id) a = a.filter(x => x.dem_id === dem_id)
+  if (statut) a = a.filter(x => x.statut === statut)
+  // Restriction elu: seulement ses audiences
+  if (req.user.role === 'elu' && req.user.elu_id) {
+    a = a.filter(x => x.elu_id === req.user.elu_id)
   }
+  res.json(a)
+})
 
-  // Niveau 2 — Nom + Prénom + Date de naissance
-  if (!match && nom && prenom && date_naissance) {
-    match = demandeurs.find(d =>
-      normalize(d.nom) === normalize(nom) &&
-      normalize(d.prenom) === normalize(prenom) &&
-      d.date_naissance && d.date_naissance === date_naissance
-    )
-    if (match) { niveau = 2; confiance = 'fort'; }
+app.post('/api/audiences', requireAuth, (req, res) => {
+  const a = readData('audiences.json')
+  const item = {
+    id: nextId(a, 'A'),
+    date_audience: req.body.date_audience || nowDate(),
+    dem_id: req.body.dem_id || '',
+    elu_id: req.body.elu_id || '',
+    quartier_origine: req.body.quartier_origine || '',
+    quartier_elu: req.body.quartier_elu || '',
+    quartier_souhaite: req.body.quartier_souhaite || '',
+    quartier_attribue: null,
+    objet: req.body.objet || '',
+    favorable: !!req.body.favorable,
+    suite: req.body.suite || '',
+    statut: 'En attente proposition',
+    jours_total: null
   }
+  a.push(item)
+  writeData('audiences.json', a)
 
-  // Niveau 3 — Nom + Prénom (exact)
-  if (!match && nom && prenom) {
-    const candidates = demandeurs.filter(d =>
-      normalize(d.nom) === normalize(nom) &&
-      normalize(d.prenom) === normalize(prenom)
-    )
-    if (candidates.length === 1) {
-      match = candidates[0]; niveau = 3; confiance = 'probable';
-    } else if (candidates.length > 1) {
-      // Homonymes — on retourne tous les candidats pour que l'agent choisisse
-      return res.json({
-        found: false,
-        homonymes: candidates.map(d => ({
-          id: d.id, nud: d.nud, nom: d.nom, prenom: d.prenom,
-          anc: d.anc, compo: d.compo, sit: d.sit,
-        })),
-        message: `${candidates.length} homonymes trouvés — sélection manuelle requise`
-      })
-    }
-  }
-
-  // Niveau 4 — Nom seul (flou) pour suggestion
-  if (!match && nom) {
-    const suggestions = demandeurs.filter(d =>
-      normalize(d.nom) === normalize(nom)
-    ).slice(0, 3)
-    if (suggestions.length > 0) {
-      return res.json({
-        found: false,
-        suggestions: suggestions.map(d => ({
-          id: d.id, nud: d.nud, nom: d.nom, prenom: d.prenom,
-          anc: d.anc, compo: d.compo,
-        })),
-        message: 'Nom trouvé mais prénom non correspondant — vérification requise'
-      })
-    }
-  }
-
-  if (match) {
-    return res.json({
-      found: true,
-      niveau,
-      confiance,
-      dem: {
-        id: match.id, nud: match.nud, nom: match.nom,
-        prenom: match.prenom, anc: match.anc,
-        compo: match.compo, sit: match.sit, rev: match.rev,
-        typ_v: match.typ_v, dalo: match.dalo,
-        violences: match.violences, sans_log: match.sans_log,
+  // Notification auto si favorable + dossier urgent
+  if (item.favorable && item.dem_id) {
+    try {
+      const demandeurs = readData('demandeurs.json')
+      const dem = demandeurs.find(d => d.id === item.dem_id)
+      if (dem && (dem.dalo || dem.violences || dem.sans_log || dem.prio_expulsion)) {
+        const notifs = readData('notifications.json')
+        notifs.unshift({
+          id: 'N' + Date.now(),
+          date: nowDate(),
+          heure: nowTime(),
+          elu_id: item.elu_id,
+          type: 'urgence_territoire',
+          titre: 'Dossier urgent - Audience favorable',
+          message: dem.nom + ' ' + dem.prenom + ' - Audience du ' + item.date_audience + '. Instruction renforcee.',
+          dem_id: item.dem_id,
+          logement_ref: null,
+          quartier: item.quartier_elu || '',
+          lu: false
+        })
+        writeData('notifications.json', notifs.slice(0, 500))
       }
+    } catch (e) {}
+  }
+
+  addLog(req.user, 'CREATE_AUDIENCE', item.objet)
+  res.status(201).json(item)
+})
+
+app.put('/api/audiences/:id', requireAuth, (req, res) => {
+  const a = readData('audiences.json')
+  const idx = a.findIndex(x => x.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
+  a[idx] = { ...a[idx], ...req.body, id: a[idx].id }
+  writeData('audiences.json', a)
+  res.json(a[idx])
+})
+
+// ============================================================
+// DECISIONS CAL
+// ============================================================
+
+app.get('/api/decisions-cal', requireAuth, (req, res) => {
+  const d = readData('decisions_cal.json')
+  res.json(d)
+})
+
+app.post('/api/decisions-cal', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const { logement_id, logement_ref, logement_adresse, date_cal, candidats } = req.body || {}
+  const decisions = readData('decisions_cal.json')
+
+  const decision = {
+    id: 'CAL' + Date.now(),
+    logement_id: logement_id || '',
+    logement_ref: logement_ref || '',
+    logement_adresse: logement_adresse || '',
+    date_cal: date_cal || nowDate(),
+    candidats: candidats || [],
+    agent_nom: req.user.prenom + ' ' + req.user.nom,
+    created_at: new Date().toISOString(),
+    statut: 'validee'
+  }
+
+  // Mettre a jour statut audience si rang 1 attribue
+  const rang1 = (candidats || []).find(c => c.decision && c.decision.includes('Retenu rang 1'))
+  if (rang1) {
+    const audiences = readData('audiences.json')
+    const idx = audiences.findIndex(a => a.dem_id === rang1.dem_id)
+    if (idx >= 0) {
+      audiences[idx].statut = 'Attribue'
+      audiences[idx].quartier_attribue = logement_adresse
+      writeData('audiences.json', audiences)
+    }
+
+    // Mettre a jour statut logement
+    const logements = readData('logements.json')
+    const lidx = logements.findIndex(l => l.id === logement_id)
+    if (lidx >= 0) {
+      logements[lidx].statut = 'attribue'
+      writeData('logements.json', logements)
+    }
+
+    // Mettre a jour statut demandeur
+    const demandeurs = readData('demandeurs.json')
+    const didx = demandeurs.findIndex(d => d.id === rang1.dem_id)
+    if (didx >= 0) {
+      demandeurs[didx].statut = 'attribue'
+      if (!demandeurs[didx].parcours) demandeurs[didx].parcours = []
+      demandeurs[didx].parcours.push({
+        date: nowDate(),
+        type: 'Attribution',
+        detail: 'Logement ' + logement_ref + ' - ' + logement_adresse
+      })
+      writeData('demandeurs.json', demandeurs)
+    }
+
+    // Notification pour l elu concerne
+    try {
+      const audiences2 = readData('audiences.json')
+      const audFav = audiences2.find(a => a.dem_id === rang1.dem_id && a.favorable)
+      if (audFav && audFav.elu_id) {
+        const notifs = readData('notifications.json')
+        notifs.unshift({
+          id: 'N' + Date.now(),
+          date: nowDate(),
+          heure: nowTime(),
+          elu_id: audFav.elu_id,
+          type: 'attribution_audience',
+          titre: 'Attribution suite a votre audience',
+          message: rang1.nom + ' vient d etre attribue au logement ' + logement_ref + ' - ' + logement_adresse,
+          dem_id: rang1.dem_id,
+          logement_ref: logement_ref,
+          quartier: audFav.quartier_attribue || '',
+          lu: false
+        })
+        writeData('notifications.json', notifs.slice(0, 500))
+      }
+    } catch (e) {}
+  }
+
+  decisions.unshift(decision)
+  writeData('decisions_cal.json', decisions)
+  addLog(req.user, 'DECISION_CAL', 'Logement ' + logement_ref)
+  res.status(201).json(decision)
+})
+
+// ============================================================
+// NOTIFICATIONS
+// ============================================================
+
+app.get('/api/notifications', requireAuth, (req, res) => {
+  let n = readData('notifications.json')
+  const { elu_id, lu } = req.query
+  if (req.user.role === 'elu' && req.user.elu_id) {
+    n = n.filter(x => x.elu_id === req.user.elu_id)
+  } else if (elu_id) {
+    n = n.filter(x => x.elu_id === elu_id)
+  }
+  if (lu !== undefined) n = n.filter(x => x.lu === (lu === 'true'))
+  res.json(n)
+})
+
+app.put('/api/notifications/:id/lu', requireAuth, (req, res) => {
+  const n = readData('notifications.json')
+  const idx = n.findIndex(x => x.id === req.params.id)
+  if (idx !== -1) { n[idx].lu = true; writeData('notifications.json', n) }
+  res.json({ ok: true })
+})
+
+app.put('/api/notifications/tout-marquer-lu', requireAuth, (req, res) => {
+  const n = readData('notifications.json')
+  const { elu_id } = req.body || {}
+  n.forEach(x => { if (!elu_id || x.elu_id === elu_id) x.lu = true })
+  writeData('notifications.json', n)
+  res.json({ ok: true })
+})
+
+// ============================================================
+// LOGS
+// ============================================================
+
+app.get('/api/logs', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+  const logs = readData('logs.json')
+  const limit = parseInt(req.query.limit) || 200
+  res.json(logs.slice(0, limit))
+})
+
+// ============================================================
+// AUDIT (tracabilite)
+// ============================================================
+
+app.get('/api/audit', requireAuth, (req, res) => {
+  let audit = readData('audit.json')
+  const { entity_type, entity_id, limit } = req.query
+  if (entity_type) audit = audit.filter(a => a.entity_type === entity_type)
+  if (entity_id) audit = audit.filter(a => a.entity_id === entity_id)
+  const lim = parseInt(limit) || 300
+  res.json(audit.slice(0, lim))
+})
+
+// ============================================================
+// ALERTES INTELLIGENTES
+// ============================================================
+
+app.get('/api/alertes', requireAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json').filter(d => d.statut === 'active')
+  const logements = readData('logements.json').filter(l => !l.statut || l.statut === 'vacant')
+  const audiences = readData('audiences.json')
+
+  const now = Date.now()
+  const parseDateFr = (s) => {
+    if (!s) return null
+    const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s)
+    if (!m) return null
+    return new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1])).getTime()
+  }
+  const monthsAgo = (ts) => Math.round((now - ts) / (1000 * 60 * 60 * 24 * 30))
+
+  const alertes = []
+
+  // 1. DALO hors delai (> 6 mois sans attribution)
+  for (const d of demandeurs) {
+    if (d.dalo && d.anc >= 6 && !audiences.some(a => a.dem_id === d.id && a.statut === 'Attribue')) {
+      alertes.push({
+        niveau: 'critique', type: 'dalo_retard',
+        titre: 'DALO en retard', sujet: d.nom + ' ' + d.prenom,
+        message: 'DALO reconnu depuis ' + d.anc + ' mois sans attribution',
+        entite: { type: 'demandeur', id: d.id }
+      })
+    }
+  }
+
+  // 2. Logements vacants depuis longtemps
+  for (const l of logements) {
+    const dispoTs = parseDateFr(l.dispo)
+    if (dispoTs) {
+      const mois = monthsAgo(dispoTs)
+      if (mois >= 3) {
+        alertes.push({
+          niveau: mois >= 6 ? 'critique' : 'attention', type: 'logement_vacant',
+          titre: 'Logement vacant', sujet: l.ref + ' - ' + l.adresse,
+          message: 'Vacant depuis environ ' + mois + ' mois',
+          entite: { type: 'logement', id: l.id }
+        })
+      }
+    }
+  }
+
+  // 3. Demandeurs sans contact depuis longtemps (pas de modif/audience depuis 6 mois)
+  for (const d of demandeurs) {
+    const dernierEv = (d.parcours || []).length ? parseDateFr((d.parcours[d.parcours.length - 1] || {}).date) : null
+    const derniereAud = audiences.filter(a => a.dem_id === d.id)
+      .map(a => parseDateFr(a.date_audience)).filter(Boolean).sort((a, b) => b - a)[0]
+    const last = Math.max(dernierEv || 0, derniereAud || 0)
+    if (last && monthsAgo(last) >= 6 && d.anc >= 12) {
+      alertes.push({
+        niveau: 'attention', type: 'dossier_inactif',
+        titre: 'Dossier sans activite', sujet: d.nom + ' ' + d.prenom,
+        message: 'Aucune modification ni audience depuis ' + monthsAgo(last) + ' mois',
+        entite: { type: 'demandeur', id: d.id }
+      })
+    }
+  }
+
+  // 4. Dossiers urgents incomplets
+  for (const d of demandeurs) {
+    if ((d.dalo || d.violences || d.sans_log) && !d.pieces) {
+      alertes.push({
+        niveau: 'attention', type: 'dossier_incomplet',
+        titre: 'Dossier urgent incomplet', sujet: d.nom + ' ' + d.prenom,
+        message: 'Priorite ' + (d.dalo ? 'DALO' : d.violences ? 'VIF' : 'sans logement') + ' - pieces manquantes',
+        entite: { type: 'demandeur', id: d.id }
+      })
+    }
+  }
+
+  // Trier par niveau
+  alertes.sort((a, b) => (a.niveau === 'critique' ? 0 : 1) - (b.niveau === 'critique' ? 0 : 1))
+
+  res.json({
+    total: alertes.length,
+    par_niveau: {
+      critique: alertes.filter(a => a.niveau === 'critique').length,
+      attention: alertes.filter(a => a.niveau === 'attention').length
+    },
+    alertes
+  })
+})
+
+// ============================================================
+// REGLES DE SCORING (lecture + edition)
+// ============================================================
+
+const DEFAULT_SCORING_RULES = {
+  criteres: [
+    { id: 'typ', label: 'Typologie adaptee', poids_max: 20, desc: 'Correspondance exacte entre la typologie souhaitee et celle du logement. +20 si exacte, +15 si dans la fourchette acceptee.' },
+    { id: 'comp', label: 'Composition familiale', poids_max: 15, desc: 'Adequation entre le nombre de personnes et le nombre de pieces. Optimum : nb personnes = nb pieces + 0 a 2.' },
+    { id: 'taux', label: "Taux d'effort", poids_max: 20, desc: 'Rapport loyer / revenu. Au-dela de 40 %, le dossier est ineligible. Plus le taux est bas, plus le score est eleve.' },
+    { id: 'anc', label: 'Anciennete de la demande', poids_max: 10, desc: 'Anciennete en mois depuis l enregistrement. Plafonnee a 10 points au-dela de 36 mois.' },
+    { id: 'urg', label: 'Urgences et criticites', poids_max: 15, desc: 'Cumul des critiques : sans logement, violences, handicap, expulsion, suroccupation, grossesse. Plafonne a 15.' },
+    { id: 'loc', label: 'Localisation souhaitee', poids_max: 10, desc: 'Quartier demande = +10, secteur demande = +8, hors zone = +2.' },
+    { id: 'prio', label: 'Priorites legales', poids_max: 5, desc: 'DALO ou priorite expulsion : +5. Mutation ou priorite handicap : +3.' },
+    { id: 'dos', label: 'Completude du dossier', poids_max: 5, desc: 'Pieces justificatives completes : +5, sinon +1.' }
+  ],
+  exclusions: [
+    'Demande non active',
+    'Typologie incompatible (hors min / max)',
+    'PMR requis non disponible',
+    'RDC requis non disponible',
+    "Taux d'effort superieur a 40 %"
+  ],
+  anti_biais: [
+    { id: 'jamais_presente', label: 'Jamais presente en CAL', effet: '+5', desc: 'Donne une chance aux dossiers jamais proposes.' },
+    { id: 'proposition_recente', label: 'Proposition recente', effet: '-5', desc: 'Moins de 2 mois depuis la derniere proposition.' },
+    { id: 'refus_repetes', label: 'Refus non motives', effet: '-3 a -8', desc: '1 refus = -3, 2 refus et + = -8.' },
+    { id: 'passages_multiples', label: 'Presente plusieurs fois', effet: '+4', desc: 'Plus de 3 presentations sans attribution.' }
+  ]
+}
+
+app.get('/api/scoring-rules', requireAuth, (req, res) => {
+  const ref = readObj('referentiels.json', {})
+  res.json(ref.scoring_rules || DEFAULT_SCORING_RULES)
+})
+
+app.put('/api/scoring-rules', requireAuth, requireRole('directeur'), (req, res) => {
+  const ref = readObj('referentiels.json', {})
+  const { __motif, ...rules } = req.body || {}
+  const before = ref.scoring_rules || DEFAULT_SCORING_RULES
+  ref.scoring_rules = rules
+  writeData('referentiels.json', ref)
+  addLog(req.user, 'UPDATE_SCORING_RULES', __motif || '')
+  addAudit(req.user, 'scoring_rules', 'global', 'Regles de scoring', 'modification',
+    [{ champ: 'rules', label: 'Regles de scoring', avant: 'version precedente', apres: 'nouvelle version' }],
+    __motif || '')
+  res.json(ref.scoring_rules)
+})
+
+// ============================================================
+// AGENDA / CALENDRIER : CAL, audiences, evenements
+// ============================================================
+
+app.get('/api/agenda', requireAuth, (req, res) => {
+  const audiences = readData('audiences.json')
+  const decisions = readData('decisions_cal.json')
+  const demandeurs = readData('demandeurs.json')
+  const ref = readObj('referentiels.json', { elus: [], evenements: [] })
+  const elus = ref.elus || []
+  const evts = ref.evenements || []
+
+  const parseDateFr = (s) => {
+    if (!s) return null
+    const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s)
+    if (!m) return null
+    return new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]))
+  }
+
+  const events = []
+
+  for (const a of audiences) {
+    const d = parseDateFr(a.date_audience)
+    if (!d) continue
+    const dem = demandeurs.find(x => x.id === a.dem_id)
+    const elu = elus.find(x => x.id === a.elu_id)
+    events.push({
+      id: 'aud-' + a.id, date: a.date_audience, iso: d.toISOString(),
+      type: 'audience',
+      titre: 'Audience - ' + (dem ? dem.nom + ' ' + dem.prenom : a.dem_id),
+      sous_titre: elu ? elu.nom + ' (' + (elu.secteur || '') + ')' : '',
+      couleur: a.favorable ? '#16A34A' : '#7C3AED',
+      objet: a.objet
     })
   }
 
-  return res.json({ found: false, message: 'Aucun candidat trouvé' })
-})
-
-// ─── ROUTE : IMPORT BATCH AUDIENCES AVEC MATCHING AUTO ───────────────────────
-app.post('/api/import/audiences', async (req, res) => {
-  const { rows } = req.body // rows = tableau d'audiences à importer
-  if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows requis' })
-
-  const demandeurs = readData('demandeurs.json')
-  const audiences = readData('audiences.json')
-  const normalize = (s) => (s || '').toLowerCase().trim()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[-']/g, ' ').replace(/\s+/g, ' ')
-
-  const results = { imported: 0, matched: 0, unmatched: 0, errors: 0 }
-  const newAudiences = [...audiences]
-
-  for (const row of rows) {
-    try {
-      // Matching candidat
-      let dem_id = row.dem_id || null
-      let match_niveau = null
-
-      if (!dem_id || dem_id === 'IMPORT') {
-        const { nud, dem_nom, dem_prenom, dem_ddn } = row
-        let matched = null
-
-        // NUD
-        if (nud) matched = demandeurs.find(d => d.nud === nud)
-        // Nom + Prénom + DDN
-        if (!matched && dem_nom && dem_prenom && dem_ddn)
-          matched = demandeurs.find(d =>
-            normalize(d.nom) === normalize(dem_nom) &&
-            normalize(d.prenom) === normalize(dem_prenom) &&
-            d.date_naissance === dem_ddn
-          )
-        // Nom + Prénom
-        if (!matched && dem_nom && dem_prenom) {
-          const candidates = demandeurs.filter(d =>
-            normalize(d.nom) === normalize(dem_nom) &&
-            normalize(d.prenom) === normalize(dem_prenom)
-          )
-          if (candidates.length === 1) matched = candidates[0]
-        }
-
-        if (matched) {
-          dem_id = matched.id
-          match_niveau = 'auto'
-          results.matched++
-        } else {
-          results.unmatched++
-        }
-      }
-
-      const newAud = {
-        id: 'A' + (newAudiences.length + 1),
-        date_audience: row.date_audience,
-        dem_id: dem_id || 'IMPORT-' + Date.now(),
-        elu_id: row.elu_id || 'IMPORT',
-        quartier_origine: row.quartier_origine || '',
-        quartier_elu: row.quartier_elu || '',
-        quartier_souhaite: row.quartier_souhaite || '',
-        quartier_attribue: null,
-        objet: row.objet || '',
-        favorable: !!row.favorable,
-        suite: row.suite || '',
-        statut: row.statut || 'En attente proposition',
-        jours_audience_proposition: null,
-        jours_proposition_attribution: null,
-        _match_niveau: match_niveau,
-        _dem_nom_original: row.dem_nom || '',
-      }
-      newAudiences.push(newAud)
-      results.imported++
-    } catch(e) {
-      results.errors++
-    }
+  for (const c of decisions) {
+    const d = parseDateFr(c.date_cal)
+    if (!d) continue
+    events.push({
+      id: 'cal-' + c.id, date: c.date_cal, iso: d.toISOString(),
+      type: 'cal',
+      titre: 'CAL - ' + c.logement_ref,
+      sous_titre: c.logement_adresse,
+      couleur: '#E05C2A',
+      objet: (c.candidats || []).length + ' candidat(s)'
+    })
   }
 
-  writeData('audiences.json', newAudiences)
-  res.json(results)
+  for (const e of evts) {
+    const d = parseDateFr(e.date)
+    if (!d) continue
+    events.push({
+      id: 'evt-' + e.id, date: e.date, iso: d.toISOString(),
+      type: e.type || 'evenement',
+      titre: e.titre || '',
+      sous_titre: e.lieu || '',
+      couleur: '#1D6FA8',
+      objet: e.description || ''
+    })
+  }
+
+  events.sort((a, b) => a.iso.localeCompare(b.iso))
+  res.json(events)
 })
 
-// ─── ROUTE : IMPORT BATCH DEMANDEURS ─────────────────────────────────────────
-app.post('/api/import/demandeurs', (req, res) => {
-  const { rows } = req.body
+app.post('/api/agenda', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const ref = readObj('referentiels.json', { evenements: [] })
+  if (!ref.evenements) ref.evenements = []
+  const ev = {
+    id: 'EV' + Date.now(),
+    date: req.body.date || nowDate(),
+    titre: req.body.titre || '',
+    type: req.body.type || 'evenement',
+    lieu: req.body.lieu || '',
+    description: req.body.description || '',
+    cree_par: req.user.prenom + ' ' + req.user.nom
+  }
+  ref.evenements.push(ev)
+  writeData('referentiels.json', ref)
+  addLog(req.user, 'CREATE_AGENDA', ev.titre)
+  res.status(201).json(ev)
+})
+
+app.delete('/api/agenda/:id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const ref = readObj('referentiels.json', { evenements: [] })
+  if (!ref.evenements) ref.evenements = []
+  const idx = ref.evenements.findIndex(e => e.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
+  const ev = ref.evenements[idx]
+  ref.evenements.splice(idx, 1)
+  writeData('referentiels.json', ref)
+  addLog(req.user, 'DELETE_AGENDA', ev.titre)
+  res.json({ ok: true })
+})
+
+// ============================================================
+// TIMELINE PAR DEMANDEUR (vue synthetique)
+// ============================================================
+
+app.get('/api/demandeurs/:id/timeline', requireAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const dem = demandeurs.find(d => d.id === req.params.id)
+  if (!dem) return res.status(404).json({ error: 'Non trouve' })
+
+  const audiences = readData('audiences.json').filter(a => a.dem_id === dem.id)
+  const decisions = readData('decisions_cal.json').filter(dc => (dc.candidats || []).some(c => c.dem_id === dem.id))
+  const ref = readObj('referentiels.json', { elus: [] })
+  const elus = ref.elus || []
+  const audit = readData('audit.json').filter(a => a.entity_type === 'demandeur' && a.entity_id === dem.id)
+
+  const timeline = []
+
+  for (const p of (dem.parcours || [])) {
+    timeline.push({ date: p.date, type: 'parcours', titre: p.type, detail: p.detail || '', couleur: '#0B1E3D' })
+  }
+  for (const a of audiences) {
+    const e = elus.find(x => x.id === a.elu_id)
+    timeline.push({
+      date: a.date_audience, type: 'audience',
+      titre: 'Audience elu ' + (e ? e.nom : a.elu_id),
+      detail: a.objet + (a.favorable ? ' (favorable)' : ''),
+      couleur: a.favorable ? '#16A34A' : '#7C3AED'
+    })
+  }
+  for (const d of decisions) {
+    const c = (d.candidats || []).find(x => x.dem_id === dem.id)
+    timeline.push({
+      date: d.date_cal, type: 'cal',
+      titre: 'Commission CAL - ' + d.logement_ref,
+      detail: c ? c.decision + (c.motif ? ' (' + c.motif + ')' : '') : '',
+      couleur: '#E05C2A'
+    })
+  }
+  for (const a of audit) {
+    timeline.push({
+      date: a.date, type: 'audit',
+      titre: 'Modification fiche par ' + a.user_nom,
+      detail: a.motif || a.changes.map(c => c.label).join(', '),
+      couleur: '#5B6B85'
+    })
+  }
+
+  // Trier par date (date fr -> iso)
+  const parseDate = (s) => {
+    const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s || '')
+    if (!m) return '0000-00-00'
+    return m[3] + '-' + m[2] + '-' + m[1]
+  }
+  timeline.sort((a, b) => parseDate(b.date).localeCompare(parseDate(a.date)))
+
+  res.json({
+    demandeur: dem,
+    timeline
+  })
+})
+
+// ============================================================
+// IMPORT
+// ============================================================
+
+app.post('/api/import/demandeurs', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const { rows } = req.body || {}
   if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows requis' })
 
   const demandeurs = readData('demandeurs.json')
-  const normalize = (s) => (s || '').toLowerCase().trim()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[-']/g, ' ').replace(/\s+/g, ' ')
+  const norm = s => (s || '').toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 
-  const results = { imported: 0, updated: 0, skipped: 0, errors: 0 }
+  let imported = 0; let updated = 0; let errors = 0
 
   for (const row of rows) {
     try {
-      // Vérifier si le demandeur existe déjà (par NUD ou Nom+Prénom)
       let existing = null
       if (row.nud) existing = demandeurs.find(d => d.nud === row.nud)
-      if (!existing && row.nom && row.prenom)
+      if (!existing && row.nom && row.prenom) {
         existing = demandeurs.find(d =>
-          normalize(d.nom) === normalize(row.nom) &&
-          normalize(d.prenom) === normalize(row.prenom)
+          norm(d.nom) === norm(row.nom) && norm(d.prenom) === norm(row.prenom)
         )
-
-      if (existing) {
-        // Mise à jour des champs manquants uniquement
-        const idx = demandeurs.indexOf(existing)
-        demandeurs[idx] = {
-          ...existing,
-          // On n'écrase que si la valeur est vide dans CAL Smart
-          nud: existing.nud || row.nud,
-          anc: existing.anc || row.anc,
-          rev: existing.rev || row.rev,
-          sit: existing.sit || row.sit,
-          date_naissance: existing.date_naissance || row.date_naissance,
-          _pelehas_sync: new Date().toISOString(),
-        }
-        results.updated++
-      } else {
-        // Nouveau demandeur
-        const newId = 'D' + (demandeurs.length + 1)
-        demandeurs.push({
-          id: newId,
-          ...row,
-          statut: row.statut || 'active',
-          parcours: [{
-            date: new Date().toLocaleDateString('fr-FR'),
-            type: 'Import Pelehas',
-            detail: `Importé le ${new Date().toLocaleDateString('fr-FR')}`
-          }],
-          _pelehas_sync: new Date().toISOString(),
-        })
-        results.imported++
       }
-    } catch(e) {
-      results.errors++
-    }
+      if (existing) {
+        const idx = demandeurs.indexOf(existing)
+        demandeurs[idx] = { ...existing, ...row, id: existing.id, statut: existing.statut }
+        updated++
+      } else {
+        demandeurs.push({
+          id: nextId(demandeurs, 'D'),
+          ...row,
+          statut: 'active',
+          parcours: [{ date: nowDate(), type: 'Import Pelehas', detail: '' }]
+        })
+        imported++
+      }
+    } catch (e) { errors++ }
   }
 
   writeData('demandeurs.json', demandeurs)
-  res.json(results)
+  addLog(req.user, 'IMPORT_DEMANDEURS', imported + ' importes, ' + updated + ' mis a jour')
+  res.json({ imported, updated, errors })
 })
 
-// ─── ROUTE : IMPORT BATCH LOGEMENTS ──────────────────────────────────────────
-app.post('/api/import/logements', (req, res) => {
-  const { rows } = req.body
+app.post('/api/import/logements', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const { rows } = req.body || {}
   if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows requis' })
 
   const logements = readData('logements.json')
-  const results = { imported: 0, updated: 0, errors: 0 }
+  let imported = 0; let updated = 0; let errors = 0
 
   for (const row of rows) {
     try {
@@ -677,322 +1514,1851 @@ app.post('/api/import/logements', (req, res) => {
       if (existing) {
         const idx = logements.indexOf(existing)
         logements[idx] = { ...existing, ...row, id: existing.id }
-        results.updated++
+        updated++
       } else {
-        logements.push({ id: 'L' + (logements.length + 1), ...row })
-        results.imported++
+        logements.push({ id: nextId(logements, 'L'), ...row, statut: 'vacant' })
+        imported++
       }
-    } catch(e) {
-      results.errors++
-    }
+    } catch (e) { errors++ }
   }
 
   writeData('logements.json', logements)
-  res.json(results)
+  res.json({ imported, updated, errors })
 })
 
-app.get('/api/audiences', (req, res) => {
-  const audiences = readData('audiences.json')
-  const { elu_id, dem_id, statut } = req.query
-  let result = audiences
-  if (elu_id) result = result.filter(a => a.elu_id === elu_id)
-  if (dem_id) result = result.filter(a => a.dem_id === dem_id)
-  if (statut) result = result.filter(a => a.statut === statut)
-  res.json(result)
-})
+app.post('/api/import/audiences', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const { rows } = req.body || {}
+  if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows requis' })
 
-app.post('/api/audiences', (req, res) => {
+  const demandeurs = readData('demandeurs.json')
   const audiences = readData('audiences.json')
-  const newId = 'A' + (audiences.length + 1)
-  const aud = { id: newId, ...req.body }
-  audiences.push(aud)
+  const norm = s => (s || '').toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+
+  let imported = 0; let matched = 0; let unmatched = 0; let errors = 0
+
+  for (const row of rows) {
+    try {
+      let dem_id = row.dem_id
+      if (!dem_id || dem_id === 'IMPORT') {
+        let found = null
+        if (row.nud) found = demandeurs.find(d => d.nud === row.nud)
+        if (!found && row.dem_nom && row.dem_prenom) {
+          found = demandeurs.find(d =>
+            norm(d.nom) === norm(row.dem_nom) && norm(d.prenom) === norm(row.dem_prenom)
+          )
+        }
+        if (found) { dem_id = found.id; matched++ } else unmatched++
+      }
+      audiences.push({
+        id: nextId(audiences, 'A'),
+        ...row,
+        dem_id: dem_id || 'IMPORT-' + Date.now(),
+        statut: row.statut || 'En attente proposition'
+      })
+      imported++
+    } catch (e) { errors++ }
+  }
+
   writeData('audiences.json', audiences)
-  res.status(201).json(aud)
+  res.json({ imported, matched, unmatched, errors })
 })
 
-app.put('/api/audiences/:id', (req, res) => {
+// ============================================================
+// EXPORT CSV
+// ============================================================
+
+function toCSV(rows, cols) {
+  const bom = '\uFEFF'
+  const header = cols.map(c => c.label).join(';')
+  const lines = rows.map(row =>
+    cols.map(c => {
+      const val = c.fn ? c.fn(row) : (row[c.key] !== undefined ? row[c.key] : '')
+      return '"' + String(val).replace(/"/g, '""') + '"'
+    }).join(';')
+  )
+  return bom + [header, ...lines].join('\n')
+}
+
+app.get('/api/export/demandeurs', requireAuth, (req, res) => {
+  const d = readData('demandeurs.json').filter(x => x.statut !== 'archive')
+  const cols = [
+    { key: 'nud', label: 'NUD' },
+    { key: 'nom', label: 'Nom' },
+    { key: 'prenom', label: 'Prenom' },
+    { key: 'anc', label: 'Anciennete (mois)' },
+    { key: 'adultes', label: 'Adultes' },
+    { key: 'enfants', label: 'Enfants' },
+    { key: 'compo', label: 'Composition' },
+    { key: 'typ_v', label: 'Typ. souhaitee' },
+    { key: 'rev', label: 'Revenu (EUR)' },
+    { key: 'sit', label: 'Situation' },
+    { key: 'statut', label: 'Statut' },
+    { fn: r => r.dalo ? 'OUI' : '', label: 'DALO' },
+    { fn: r => r.violences ? 'OUI' : '', label: 'VIF' },
+    { fn: r => r.sans_log ? 'OUI' : '', label: 'Sans logement' },
+    { fn: r => r.pieces ? 'OUI' : 'NON', label: 'Dossier complet' }
+  ]
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', 'attachment; filename="demandeurs.csv"')
+  res.send(toCSV(d, cols))
+})
+
+app.get('/api/export/logements', requireAuth, (req, res) => {
+  const l = readData('logements.json').filter(x => !x.statut || x.statut === 'vacant')
+  const cols = [
+    { key: 'ref', label: 'Reference' },
+    { key: 'bailleur', label: 'Bailleur' },
+    { key: 'adresse', label: 'Adresse' },
+    { key: 'quartier', label: 'Quartier' },
+    { key: 'typ', label: 'Typ.' },
+    { key: 'surface', label: 'Surface m2' },
+    { key: 'loyer', label: 'Loyer total (EUR)' },
+    { key: 'plafond', label: 'Plafond' },
+    { key: 'contingent', label: 'Contingent' },
+    { key: 'dispo', label: 'Disponible le' }
+  ]
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', 'attachment; filename="logements.csv"')
+  res.send(toCSV(l, cols))
+})
+
+app.get('/api/export/audiences', requireAuth, (req, res) => {
   const audiences = readData('audiences.json')
-  const idx = audiences.findIndex(a => a.id === req.params.id)
-  if (idx === -1) return res.status(404).json({ error: 'Non trouvé' })
-  audiences[idx] = { ...audiences[idx], ...req.body }
-  writeData('audiences.json', audiences)
-  res.json(audiences[idx])
+  const demandeurs = readData('demandeurs.json')
+  const ref = readObj('referentiels.json', { elus: [] })
+  const elus = ref.elus || []
+  const cols = [
+    { key: 'date_audience', label: 'Date' },
+    { fn: r => { const d = demandeurs.find(x => x.id === r.dem_id); return d ? d.nom + ' ' + d.prenom : r.dem_id }, label: 'Demandeur' },
+    { fn: r => { const e = elus.find(x => x.id === r.elu_id); return e ? e.nom : r.elu_id }, label: 'Elu' },
+    { key: 'quartier_origine', label: 'Quartier origine' },
+    { key: 'quartier_souhaite', label: 'Quartier souhaite' },
+    { fn: r => r.favorable ? 'OUI' : 'NON', label: 'Favorable' },
+    { key: 'statut', label: 'Statut' },
+    { key: 'quartier_attribue', label: 'Quartier attribue' }
+  ]
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', 'attachment; filename="audiences.csv"')
+  res.send(toCSV(audiences, cols))
 })
 
-// ─── ROUTES : NOTIFICATIONS ───────────────────────────────────────────────────
+// ============================================================
+// RAPPORT MENSUEL
+// ============================================================
 
-app.get('/api/notifications', (req, res) => {
-  const notifications = readData('notifications.json')
-  const { elu_id, type, lu } = req.query
-  let result = notifications
-  if (elu_id) result = result.filter(n => n.elu_id === elu_id)
-  if (type) result = result.filter(n => n.type === type)
-  if (lu !== undefined) result = result.filter(n => n.lu === (lu === 'true'))
-  res.json(result)
-})
-
-app.put('/api/notifications/:id/lu', (req, res) => {
-  const notifications = readData('notifications.json')
-  const idx = notifications.findIndex(n => n.id === req.params.id)
-  if (idx === -1) return res.status(404).json({ error: 'Non trouvé' })
-  notifications[idx].lu = true
-  writeData('notifications.json', notifications)
-  res.json(notifications[idx])
-})
-
-app.put('/api/notifications/tout-marquer-lu', (req, res) => {
-  const notifications = readData('notifications.json')
-  const { elu_id } = req.body
-  notifications.forEach(n => {
-    if (!elu_id || n.elu_id === elu_id) n.lu = true
-  })
-  writeData('notifications.json', notifications)
-  res.json({ ok: true })
-})
-
-// ─── ROUTES : ÉLUS ────────────────────────────────────────────────────────────
-
-app.get('/api/elus', (req, res) => {
-  const ref = readData('referentiels.json')
-  res.json(ref.elus)
-})
-
-// ─── ROUTES : RÉFÉRENTIELS ────────────────────────────────────────────────────
-
-app.get('/api/referentiels', (req, res) => {
-  const ref = readData('referentiels.json')
-  res.json(ref)
-})
-
-// ─── ROUTES : DASHBOARD ───────────────────────────────────────────────────────
-
-app.get('/api/dashboard', (req, res) => {
+app.get('/api/rapport-mensuel', requireAuth, (req, res) => {
   const demandeurs = readData('demandeurs.json')
   const logements = readData('logements.json')
   const audiences = readData('audiences.json')
-  const notifications = readData('notifications.json')
+  const ref = readObj('referentiels.json', { elus: [] })
+  const elus = ref.elus || []
 
   const actifs = demandeurs.filter(d => d.statut === 'active')
-  const urgents = actifs.filter(d => d.dalo || d.prio_expulsion || d.sans_log || d.violences)
-  const incomplets = actifs.filter(d => !d.pieces)
+  const attribues = audiences.filter(a => a.statut === 'Attribue')
 
-  // Tension par quartier
+  const statsElus = elus.filter(e => e.actif !== false).map(elu => {
+    const eAud = audiences.filter(a => a.elu_id === elu.id)
+    const eAttr = eAud.filter(a => a.statut === 'Attribue')
+    return {
+      id: elu.id,
+      nom: elu.nom,
+      secteur: elu.secteur,
+      nb_audiences: eAud.length,
+      nb_favorables: eAud.filter(a => a.favorable).length,
+      nb_attributions: eAttr.length,
+      taux: eAud.length ? Math.round(eAttr.length / eAud.length * 100) : 0
+    }
+  }).sort((a, b) => b.nb_attributions - a.nb_attributions)
+
+  const parTyp = { T1: 0, T2: 0, T3: 0, 'T4+': 0 }
+  actifs.forEach(d => {
+    const k = ['T1', 'T2', 'T3'].includes(d.typ_v) ? d.typ_v : 'T4+'
+    parTyp[k]++
+  })
+
   const parQuartier = {}
   actifs.forEach(d => {
-    d.quartiers.forEach(q => {
-      if (!parQuartier[q]) parQuartier[q] = 0
-      parQuartier[q]++
-    })
+    (d.quartiers || []).forEach(q => { parQuartier[q] = (parQuartier[q] || 0) + 1 })
   })
 
-  // Délai moyen attributions post-audience
-  const attribues = audiences.filter(a => a.statut === 'Attribué' && a.jours_audience_proposition)
-  const delaiMoyen = attribues.length
-    ? Math.round(attribues.reduce((s, a) =>
-        s + a.jours_audience_proposition + (a.jours_proposition_attribution || 0), 0) / attribues.length)
-    : null
+  const nbDalo = attribues.filter(a => {
+    const d = demandeurs.find(x => x.id === a.dem_id)
+    return d && d.dalo
+  }).length
+
+  const urgentsSansProposition = actifs.filter(d =>
+    (d.dalo || d.sans_log || d.violences || d.prio_expulsion) &&
+    !audiences.some(a => a.dem_id === d.id && a.statut === 'Attribue')
+  )
 
   res.json({
+    generated_at: nowDate(),
     nb_demandeurs_actifs: actifs.length,
-    nb_logements_disponibles: logements.length,
-    nb_urgents: urgents.length,
-    nb_incomplets: incomplets.length,
+    nb_logements: logements.filter(l => !l.statut || l.statut === 'vacant').length,
     nb_audiences: audiences.length,
-    nb_audiences_favorables: audiences.filter(a => a.favorable).length,
-    nb_attribues_post_audience: audiences.filter(a => a.statut === 'Attribué').length,
-    nb_notifications_non_lues: notifications.filter(n => !n.lu).length,
-    delai_moyen_attribution: delaiMoyen,
-    tension_par_quartier: Object.entries(parQuartier)
+    nb_favorables: audiences.filter(a => a.favorable).length,
+    nb_attributions: attribues.length,
+    taux_attribution: audiences.length ? Math.round(attribues.length / audiences.length * 100) : 0,
+    compliance_dalo: {
+      taux: attribues.length ? Math.round(nbDalo / attribues.length * 100) : 0,
+      nb: nbDalo,
+      objectif: 25,
+      ok: attribues.length ? (nbDalo / attribues.length * 100) >= 25 : false
+    },
+    par_typ: parTyp,
+    par_quartier: Object.entries(parQuartier)
       .sort((a, b) => b[1] - a[1])
       .map(([quartier, nb]) => ({ quartier, nb })),
-    tension_par_typ: {
-      T1: actifs.filter(d => d.typ_v === 'T1').length,
-      T2: actifs.filter(d => d.typ_v === 'T2').length,
-      T3: actifs.filter(d => d.typ_v === 'T3').length,
-      'T4+': actifs.filter(d => ['T4','T5','T6'].includes(d.typ_v)).length,
-    }
+    stats_elus: statsElus,
+    urgents_sans_proposition: urgentsSansProposition.slice(0, 10).map(d => ({
+      id: d.id, nom: d.nom, prenom: d.prenom, anc: d.anc, nud: d.nud,
+      flags: [d.dalo ? 'DALO' : '', d.violences ? 'VIF' : '', d.sans_log ? 'SDF' : '', d.prio_expulsion ? 'Expulsion' : ''].filter(Boolean)
+    })),
+    nb_urgents_sans_proposition: urgentsSansProposition.length
   })
 })
 
-// ─── ROUTE : EXPORT PDF FICHE CAL ────────────────────────────────────────────
+// ============================================================
+// PORTAIL CANDIDAT (public)
+// ============================================================
 
-app.get('/api/cal/pdf/:logement_id', (req, res) => {
-  const { logement_id } = req.params
-  const tmpDir = join(__dirname, '../tmp')
-  if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true })
+app.get('/api/portail/dossier/:nud', (req, res) => {
+  const { nud } = req.params
+  if (!nud || nud.length < 4) return res.status(400).json({ error: 'NUD invalide' })
 
-  const outPath = join(tmpDir, `CAL_${logement_id}_${Date.now()}.pdf`)
+  const demandeurs = readData('demandeurs.json')
+  const audiences = readData('audiences.json')
+  const decisions = readData('decisions_cal.json')
 
-  const py = spawn('python3', [
-    join(__dirname, 'generate_pdf.py'),
-    logement_id,
-    outPath
-  ])
+  const clean = s => (s || '').toLowerCase().replace(/[\s-]/g, '')
+  const dem = demandeurs.find(d => d.nud && clean(d.nud) === clean(nud))
 
-  py.stderr.on('data', d => console.error('[PDF]', d.toString()))
+  if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
 
-  py.on('close', code => {
-    if (code !== 0) {
-      return res.status(500).json({ error: 'Erreur génération PDF' })
-    }
-    res.download(outPath, `Fiche_CAL_${logement_id}.pdf`, err => {
-      if (err) console.error(err)
-      try { unlinkSync(outPath) } catch(e) {}
+  const audPubliques = audiences
+    .filter(a => a.dem_id === dem.id)
+    .map(a => ({ date: a.date_audience, type: 'Audience elu', favorable: a.favorable, statut: a.statut, quartier_attribue: a.quartier_attribue || null }))
+
+  const decPubliques = decisions
+    .filter(d => (d.candidats || []).some(c => c.dem_id === dem.id))
+    .map(d => {
+      const c = d.candidats.find(x => x.dem_id === dem.id)
+      return { date: d.date_cal, logement_ref: d.logement_ref, decision: c ? c.decision : 'Examine' }
     })
+
+  let etape = 1
+  let statut = 'En cours d instruction'
+  if (dem.statut === 'attribue') { etape = 4; statut = 'Logement attribue' }
+  else if (audPubliques.some(a => a.statut === 'Attribue')) { etape = 4; statut = 'Attribution en cours' }
+  else if (audPubliques.some(a => a.favorable)) { etape = 3; statut = 'Proposition attendue' }
+  else if (audPubliques.length > 0) { etape = 2; statut = 'Suivi actif' }
+
+  const historique = [
+    ...(dem.parcours || []).map(p => ({ date: p.date, type: p.type })),
+    ...audPubliques.map(a => ({ date: a.date, type: 'Audience elu - ' + (a.favorable ? 'Favorable' : 'Neutre') })),
+    ...decPubliques.map(d => ({ date: d.date, type: 'Commission CAL - ' + d.decision }))
+  ]
+
+  res.json({
+    nud: dem.nud,
+    prenom: dem.prenom,
+    nom_initial: dem.nom ? dem.nom[0] + '.' : '',
+    anc_mois: dem.anc || 0,
+    typ_souhaitee: dem.typ_v,
+    statut,
+    etape,
+    pieces_ok: !!dem.pieces,
+    historique,
+    actions_requises: dem.pieces ? [] : ['Pieces justificatives incompletes - contactez le service habitat'],
+    contact: {
+      service: 'Service Habitat - Mairie de Saint-Denis',
+      adresse: '2 place du Caquet, 93200 Saint-Denis',
+      tel: '01 49 33 64 00',
+      horaires: 'Lun-Ven 8h30-12h / 13h30-17h',
+      email: 'habitat@ville-saint-denis.fr'
+    }
   })
 })
 
-// ─── ROUTES TELEGRAM ──────────────────────────────────────────────────────────
+// ============================================================
+// MATCH CANDIDAT (pour import)
+// ============================================================
 
-// Webhook Telegram — reçoit les messages entrants du bot
-app.post('/api/telegram/webhook', async (req, res) => {
-  try { await handleWebhook(req.body) } catch(e) { console.error('[Telegram webhook]', e) }
+app.post('/api/match-candidat', requireAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const { nud, nom, prenom } = req.body || {}
+  const norm = s => (s || '').toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+
+  if (nud) {
+    const match = demandeurs.find(d => d.nud === nud)
+    if (match) return res.json({ found: true, niveau: 1, dem: match })
+  }
+
+  if (nom && prenom) {
+    const candidates = demandeurs.filter(d =>
+      norm(d.nom) === norm(nom) && norm(d.prenom) === norm(prenom)
+    )
+    if (candidates.length === 1) return res.json({ found: true, niveau: 3, dem: candidates[0] })
+    if (candidates.length > 1) return res.json({ found: false, homonymes: candidates })
+  }
+
+  res.json({ found: false })
+})
+
+// ============================================================
+// TELEGRAM - chat_ids, liens, tests, digest
+// ============================================================
+
+// QR code data URL (utilitaire leger, via tiers gratuit sans cle)
+function qrFor(url) {
+  return 'https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=' + encodeURIComponent(url)
+}
+
+// Statut Telegram d un elu (connecte / non)
+app.get('/api/telegram/statut/elu/:id', requireAuth, (req, res) => {
+  const chatId = tgGetChatId('elu', req.params.id)
+  res.json({ connecte: !!chatId, chat_id: chatId || null })
+})
+
+// Statut Telegram d un demandeur
+app.get('/api/telegram/statut/demandeur/:id', requireAuth, (req, res) => {
+  const chatId = tgGetChatId('demandeur', req.params.id)
+  res.json({ connecte: !!chatId, chat_id: chatId || null })
+})
+
+// Lien de connexion personnel pour un elu (avec QR code)
+app.get('/api/telegram/lien-elu/:id', requireAuth, (req, res) => {
+  const ref = readObj('referentiels.json', {})
+  const elu = (ref.elus || []).find(e => e.id === req.params.id)
+  if (!elu) return res.status(404).json({ error: 'Elu introuvable' })
+  const lien = genererLienElu(elu.id)
+  res.json({ lien, qr: qrFor(lien), elu_nom: elu.nom + ' ' + (elu.prenom || '') })
+})
+
+// Lien de connexion personnel pour un candidat
+app.get('/api/telegram/lien-candidat/:id', requireAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const dem = demandeurs.find(d => d.id === req.params.id)
+  if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
+  const lien = genererLienCandidat(dem.id)
+  res.json({ lien, qr: qrFor(lien), dem_nom: dem.nom + ' ' + dem.prenom })
+})
+
+// Enregistrer manuellement un chat_id pour un elu (utile pour test sans webhook)
+app.post('/api/telegram/register-elu/:id', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+  const chatId = req.body && req.body.chat_id
+  if (!chatId) return res.status(400).json({ error: 'chat_id requis' })
+  tgSaveChatId('elu', req.params.id, chatId)
+  addLog(req.user, 'TELEGRAM_REGISTER_ELU', 'elu ' + req.params.id + ' chat_id ' + chatId)
   res.json({ ok: true })
 })
 
-// Liens de connexion Telegram pour un élu
-app.get('/api/telegram/lien-elu/:elu_id', requireAuth, (req, res) => {
-  const lien = genererLienElu(req.params.elu_id)
-  res.json({ lien, qr: `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(lien)}` })
+// Enregistrer manuellement un chat_id pour un demandeur
+app.post('/api/telegram/register-demandeur/:id', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+  const chatId = req.body && req.body.chat_id
+  if (!chatId) return res.status(400).json({ error: 'chat_id requis' })
+  tgSaveChatId('demandeur', req.params.id, chatId)
+  addLog(req.user, 'TELEGRAM_REGISTER_DEM', 'dem ' + req.params.id + ' chat_id ' + chatId)
+  res.json({ ok: true })
 })
 
-// Lien pour un demandeur
-app.get('/api/telegram/lien-candidat/:dem_id', requireAuth, (req, res) => {
-  const lien = genererLienCandidат(req.params.dem_id)
-  res.json({ lien })
-})
-
-// Vérifier si un élu est connecté Telegram
-app.get('/api/telegram/statut/:type/:id', requireAuth, (req, res) => {
-  const chatId = getChatId(req.params.type, req.params.id)
-  res.json({ connecte: !!chatId, chat_id: chatId })
-})
-
-// Envoyer un message de test à un élu
-app.post('/api/telegram/test/:elu_id', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
-  const chatId = getChatId('elu', req.params.elu_id)
-  if (!chatId) return res.status(404).json({ error: 'Élu non connecté à Telegram' })
-  const ok = await sendMessage(chatId,
-    `🔔 <b>Test CAL Smart</b>\n\nCe message confirme que votre connexion Telegram fonctionne correctement.\n\n<i>Envoyé par ${req.user.prenom} ${req.user.nom}</i>`)
+// Envoyer un message test a un elu connecte
+app.post('/api/telegram/test/:id', requireAuth, async (req, res) => {
+  const chatId = tgGetChatId('elu', req.params.id)
+  if (!chatId) return res.status(400).json({ error: 'Elu non connecte' })
+  const ref = readObj('referentiels.json', {})
+  const elu = (ref.elus || []).find(e => e.id === req.params.id)
+  const ok = await tgSend(chatId, '[ok] <b>Message de test Logivia</b>\n\nBonjour ' + (elu ? elu.prenom + ' ' + elu.nom : '') + ',\n\nCe message confirme que les notifications Telegram fonctionnent pour votre compte.\n\n<i>Envoye depuis le tableau de bord Logivia - Saint-Denis.</i>')
+  addLog(req.user, 'TELEGRAM_TEST', 'elu ' + req.params.id)
   res.json({ ok })
 })
 
-// Envoyer le digest hebdo manuellement
+// Envoyer un message test a un candidat connecte
+app.post('/api/telegram/test-candidat/:id', requireAuth, async (req, res) => {
+  const chatId = tgGetChatId('demandeur', req.params.id)
+  if (!chatId) return res.status(400).json({ error: 'Candidat non connecte' })
+  const demandeurs = readData('demandeurs.json')
+  const dem = demandeurs.find(d => d.id === req.params.id)
+  const ok = await tgSend(chatId, '[ok] <b>Message de test Logivia</b>\n\nBonjour ' + (dem ? dem.prenom : '') + ',\n\nCe message confirme que les notifications Telegram fonctionnent pour votre dossier.\n\n<i>Ville de Saint-Denis - Service Habitat.</i>')
+  res.json({ ok })
+})
+
+// Envoyer digest hebdo immediat
 app.post('/api/telegram/digest', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
   try {
     await envoyerDigestHebdo()
-    log(req.user, 'TELEGRAM_DIGEST', 'Digest hebdo envoyé manuellement', 'info')
+    addLog(req.user, 'TELEGRAM_DIGEST', 'envoi manuel')
     res.json({ ok: true })
-  } catch(e) {
+  } catch (e) {
     res.status(500).json({ error: e.message })
   }
 })
 
-// Notifier un élu d'une urgence manuellement
-app.post('/api/telegram/urgence', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
-  const { elu_id, dem_id, jours } = req.body
-  const demandeurs = readData('demandeurs.json')
-  const ref = readData('referentiels.json')
-  const dem = demandeurs.find(d => d.id === dem_id)
-  const elu = (ref.elus||[]).find(e => e.id === elu_id)
-  if (!dem || !elu) return res.status(404).json({ error: 'Élu ou demandeur non trouvé' })
-  const ok = await notifierUrgenceElu(elu_id, dem, elu.secteur, jours || 0)
-  log(req.user, 'TELEGRAM_URGENCE', `Urgence envoyée à ${elu.nom} pour ${dem.nom}`, 'info')
-  res.json({ ok })
+// Webhook entrant Telegram (utilise quand le bot reçoit un message)
+/**
+ * Envoi de test direct a un chat_id (pour le directeur qui veut
+ * recevoir un message de test sur son propre Telegram sans
+ * passer par l'enregistrement elu/demandeur).
+ */
+app.post('/api/telegram/test-direct', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
+  const { chat_id, texte } = req.body || {}
+  if (!chat_id) return res.status(400).json({ error: 'chat_id requis. Ouvrez @CALSmartSaintDenis_bot sur Telegram, tapez /start, le chat_id vous sera affiche.' })
+  const messageFinal = (texte && texte.trim()) ||
+    '<b>Test Logivia</b>\n\nCeci est un message de test envoye par ' + req.user.nom +
+    ' depuis l\'application Logivia.\n\nSi vous voyez ce message, l\'integration Telegram fonctionne correctement.\n\nHeure : ' + new Date().toLocaleString('fr-FR')
+  try {
+    const result = await tgSend(String(chat_id), messageFinal)
+    if (result && result.ok) {
+      addLog(req.user, 'TELEGRAM_TEST', 'chat_id: ' + chat_id)
+      return res.json({ ok: true, message_id: result.result && result.result.message_id })
+    }
+    return res.status(500).json({ ok: false, error: (result && result.description) || 'Erreur Telegram inconnue' })
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message })
+  }
 })
 
-// Enregistrer le webhook Telegram (à appeler une fois après déploiement)
-app.post('/api/telegram/set-webhook', requireAuth, requireRole('directeur'), async (req, res) => {
-  const { url } = req.body
-  if (!url) return res.status(400).json({ error: 'URL requise' })
+/**
+ * Configure le webhook Telegram automatiquement.
+ * A appeler une fois apres deploiement pour que Telegram notifie le serveur
+ * sur chaque /start, /statut, etc.
+ */
+app.post('/api/telegram/setup-webhook', requireAuth, requireRole('directeur'), async (req, res) => {
+  const appUrl = process.env.APP_URL || req.body.app_url
+  if (!appUrl) return res.status(400).json({ error: 'APP_URL non definie. Passez app_url dans le body ou settez la variable d\'environnement.' })
+  const webhookUrl = appUrl.replace(/\/$/, '') + '/api/telegram/webhook'
+  const BOT_TOKEN = process.env.BOT_TOKEN || '8365732100:AAHhqqnayRjBSQMIpyy3YHxZh6fYnMPexI0'
   try {
-    const r = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN || '8365732100:AAHhqqnayRjBSQMIpyy3YHxZh6fYnMPexI0'}/setWebhook`, {
+    const r = await fetch('https://api.telegram.org/bot' + BOT_TOKEN + '/setWebhook', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: `${url}/api/telegram/webhook` })
+      body: JSON.stringify({ url: webhookUrl, allowed_updates: ['message'] })
     })
     const data = await r.json()
-    log(req.user, 'TELEGRAM_WEBHOOK', `Webhook configuré : ${url}`, 'info')
-    res.json(data)
-  } catch(e) {
-    res.status(500).json({ error: e.message })
+    addLog(req.user, 'TELEGRAM_WEBHOOK', 'URL: ' + webhookUrl + ' - ' + (data.description || ''))
+    res.json({ ok: data.ok, webhook_url: webhookUrl, telegram_response: data })
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message })
   }
 })
 
-// ─── DIGEST HEBDO AUTOMATIQUE ─────────────────────────────────────────────────
-// Envoie le digest tous les lundis à 9h
-function schedulerDigest() {
-  const now = new Date()
-  const nextMonday = new Date(now)
-  nextMonday.setDate(now.getDate() + ((1 + 7 - now.getDay()) % 7 || 7))
-  nextMonday.setHours(9, 0, 0, 0)
-  const delay = nextMonday - now
-  setTimeout(async () => {
-    console.log('[Telegram] Envoi digest hebdo automatique…')
-    await envoyerDigestHebdo()
-    setInterval(async () => {
-      console.log('[Telegram] Envoi digest hebdo automatique…')
-      await envoyerDigestHebdo()
-    }, 7 * 24 * 60 * 60 * 1000)
-  }, delay)
-  console.log(`[Telegram] Prochain digest : ${nextMonday.toLocaleString('fr-FR')}`)
-}
-
-// ─── ALERTES URGENCES AUTOMATIQUES ───────────────────────────────────────────
-// Vérifie toutes les 24h les dossiers urgents sans proposition depuis 30+ jours
-async function checkUrgences() {
+/**
+ * Verifie l'etat du webhook Telegram (infos debug).
+ */
+app.get('/api/telegram/webhook-info', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
+  const BOT_TOKEN = process.env.BOT_TOKEN || '8365732100:AAHhqqnayRjBSQMIpyy3YHxZh6fYnMPexI0'
   try {
-    const demandeurs = readData('demandeurs.json')
-    const audiences = readData('audiences.json')
-    const ref = readData('referentiels.json')
+    const r = await fetch('https://api.telegram.org/bot' + BOT_TOKEN + '/getWebhookInfo')
+    const data = await r.json()
+    res.json(data)
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message })
+  }
+})
 
-    const urgents = demandeurs.filter(d =>
-      d.statut === 'active' && (d.dalo || d.sans_log || d.violences || d.prio_expulsion)
-    )
+app.post('/api/telegram/webhook', async (req, res) => {
+  try {
+    await tgHandleWebhook(req.body || {})
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[Telegram webhook]', e.message)
+    res.status(200).json({ ok: false })
+  }
+})
 
-    for (const dem of urgents) {
-      const audFav = audiences.find(a =>
-        a.dem_id === dem.id && a.favorable && a.statut !== 'Attribué'
-      )
-      if (!audFav) continue
+// Liste des elus avec leur etat de connexion
+app.get('/api/telegram/elus-status', requireAuth, (req, res) => {
+  const ref = readObj('referentiels.json', {})
+  const all = tgGetAllChatIds('elu')
+  const out = (ref.elus || []).map(e => ({
+    id: e.id, nom: e.nom, prenom: e.prenom || '', secteur: e.secteur,
+    connecte: !!all[e.id], chat_id: all[e.id] || null
+  }))
+  res.json(out)
+})
 
-      // Calculer jours depuis l'audience
-      const parts = audFav.date_audience.split('/')
-      const dateAud = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`)
-      const jours = Math.floor((Date.now() - dateAud) / (1000 * 60 * 60 * 24))
+// ============================================================
+// COURRIERS OFFICIELS aux candidats (avec statuts)
+// Statuts possibles :
+//   en_attente : reponse en attente de traitement
+//   prioritaire : dossier prioritise
+//   deja_livre : operation de relogement deja effectuee
+//   livre : logement attribue et livre
+//   refuse : refus motive
+//   en_etude : en instruction
+// ============================================================
 
-      // Alerter si > 30 jours sans proposition
-      if (jours > 30) {
-        const elu = (ref.elus||[]).find(e => e.id === audFav.elu_id)
-        if (elu) {
-          await notifierUrgenceElu(audFav.elu_id, dem, elu.secteur, jours)
-          console.log(`[Telegram] Alerte urgence envoyée : ${dem.nom} → ${elu.nom}`)
-        }
-      }
-    }
-  } catch(e) {
-    console.error('[Telegram] Erreur check urgences:', e)
+const COURRIER_STATUTS = ['en_attente', 'prioritaire', 'deja_livre', 'livre', 'refuse', 'en_etude']
+
+const COURRIER_TEMPLATES = {
+  en_attente: {
+    libelle: 'Reponse en attente',
+    couleur: '#D97706',
+    objet: 'Votre demande de logement social - accuse de reception',
+    corps: (dem) =>
+`Madame, Monsieur ${dem.nom},
+
+Nous accusons reception de votre demande de logement social (NUD ${dem.nud || '-'}).
+
+Votre dossier est en cours d examen par nos services. Nous reviendrons vers vous des que votre situation aura ete etudiee par la commission d attribution.
+
+Dans l attente, nous vous prions d agreer, Madame, Monsieur, l expression de nos salutations distinguees.
+
+Service Habitat - Ville de Saint-Denis`
+  },
+  prioritaire: {
+    libelle: 'Dossier prioritaire',
+    couleur: '#DC2626',
+    objet: 'Votre demande de logement social - dossier reconnu prioritaire',
+    corps: (dem) =>
+`Madame, Monsieur ${dem.nom},
+
+Nous vous informons que votre dossier de demande de logement social (NUD ${dem.nud || '-'}) a ete reconnu prioritaire par nos services au regard de votre situation.
+
+Votre dossier sera presente en priorite lors des prochaines commissions d attribution.
+
+Nous vous prions d agreer, Madame, Monsieur, l expression de nos salutations distinguees.
+
+Service Habitat - Ville de Saint-Denis`
+  },
+  deja_livre: {
+    libelle: 'Operation deja livree',
+    couleur: '#16A34A',
+    objet: 'Votre demande de logement social - operation de relogement deja livree',
+    corps: (dem) =>
+`Madame, Monsieur ${dem.nom},
+
+Nous vous informons que le programme auquel votre dossier avait ete rattache (NUD ${dem.nud || '-'}) a deja fait l objet d attributions completes.
+
+Votre dossier reste actif et sera etudie sur les prochaines operations.
+
+Nous vous prions d agreer, Madame, Monsieur, l expression de nos salutations distinguees.
+
+Service Habitat - Ville de Saint-Denis`
+  },
+  livre: {
+    libelle: 'Logement attribue',
+    couleur: '#16A34A',
+    objet: 'Votre demande de logement social - attribution',
+    corps: (dem) =>
+`Madame, Monsieur ${dem.nom},
+
+Nous avons le plaisir de vous informer qu un logement vous a ete attribue suite a votre demande (NUD ${dem.nud || '-'}).
+
+Le bailleur prendra contact avec vous prochainement pour finaliser votre entree dans les lieux.
+
+Nous vous prions d agreer, Madame, Monsieur, l expression de nos salutations distinguees.
+
+Service Habitat - Ville de Saint-Denis`
+  },
+  refuse: {
+    libelle: 'Refus motive',
+    couleur: '#DC2626',
+    objet: 'Votre demande de logement social - decision',
+    corps: (dem) =>
+`Madame, Monsieur ${dem.nom},
+
+Apres examen en commission, votre demande de logement social (NUD ${dem.nud || '-'}) n a pu etre retenue a ce jour.
+
+Votre dossier reste neanmoins actif et sera reetudie pour les prochaines commissions.
+
+Nous vous prions d agreer, Madame, Monsieur, l expression de nos salutations distinguees.
+
+Service Habitat - Ville de Saint-Denis`
+  },
+  en_etude: {
+    libelle: 'En etude',
+    couleur: '#1D6FA8',
+    objet: 'Votre demande de logement social - etude en cours',
+    corps: (dem) =>
+`Madame, Monsieur ${dem.nom},
+
+Votre dossier (NUD ${dem.nud || '-'}) est actuellement en cours d etude par nos services.
+
+Nous reviendrons vers vous une fois cette etude terminee.
+
+Service Habitat - Ville de Saint-Denis`
   }
 }
 
-// ─── CATCH-ALL : React Router (production uniquement) ────────────────────────
-// Toute URL qui n'est pas /api/* renvoie le index.html du build React
-if (IS_PROD) {
+// Lister les courriers
+app.get('/api/courriers', requireAuth, (req, res) => {
+  const all = readData('courriers.json')
+  const qDem = req.query.dem_id
+  const qStatut = req.query.statut
+  let out = all
+  if (qDem) out = out.filter(c => c.dem_id === qDem)
+  if (qStatut) out = out.filter(c => c.statut === qStatut)
+  out = out.slice().reverse()
+  res.json(out)
+})
+
+// Templates dispos
+app.get('/api/courriers/templates', requireAuth, (req, res) => {
+  res.json(Object.entries(COURRIER_TEMPLATES).map(([k, v]) => ({
+    statut: k, libelle: v.libelle, couleur: v.couleur, objet: v.objet
+  })))
+})
+
+// Statistiques courriers
+app.get('/api/courriers/stats', requireAuth, (req, res) => {
+  const all = readData('courriers.json')
+  const byStatut = {}
+  for (const s of COURRIER_STATUTS) byStatut[s] = 0
+  for (const c of all) byStatut[c.statut] = (byStatut[c.statut] || 0) + 1
+  res.json({ total: all.length, par_statut: byStatut })
+})
+
+// Creer un courrier et l envoyer (Telegram si dispo + enregistrement)
+app.post('/api/courriers', requireAuth, async (req, res) => {
+  const { dem_id, statut, objet, corps, envoyer_telegram } = req.body || {}
+  if (!dem_id || !statut) return res.status(400).json({ error: 'dem_id et statut requis' })
+  if (!COURRIER_STATUTS.includes(statut)) return res.status(400).json({ error: 'statut invalide' })
+  const demandeurs = readData('demandeurs.json')
+  const dem = demandeurs.find(d => d.id === dem_id)
+  if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
+
+  const tpl = COURRIER_TEMPLATES[statut]
+  const all = readData('courriers.json')
+  const courrier = {
+    id: nextId(all, 'CO'),
+    dem_id,
+    dem_nom: dem.nom + ' ' + dem.prenom,
+    dem_nud: dem.nud || '',
+    statut,
+    libelle_statut: tpl.libelle,
+    objet: objet || tpl.objet,
+    corps: corps || tpl.corps(dem),
+    cree_par: req.user.nom || req.user.login,
+    role: req.user.role,
+    date_creation: nowDate(),
+    heure_creation: nowTime(),
+    telegram_envoye: false,
+    telegram_chat_id: null,
+    historique: [
+      { date: nowDate(), heure: nowTime(), user: req.user.nom || req.user.login, action: 'creation', statut }
+    ]
+  }
+
+  // Envoi Telegram si demande et candidat connecte
+  if (envoyer_telegram) {
+    const chatId = tgGetChatId('demandeur', dem_id)
+    if (chatId) {
+      const headline = '<b>' + tpl.libelle.toUpperCase() + '</b>\n<b>' + courrier.objet + '</b>\n\n'
+      const ok = await tgSend(chatId, headline + courrier.corps)
+      courrier.telegram_envoye = !!ok
+      courrier.telegram_chat_id = chatId
+      courrier.historique.push({
+        date: nowDate(), heure: nowTime(),
+        user: req.user.nom || req.user.login,
+        action: ok ? 'envoi_telegram_ok' : 'envoi_telegram_echec'
+      })
+    } else {
+      courrier.historique.push({
+        date: nowDate(), heure: nowTime(),
+        user: req.user.nom || req.user.login,
+        action: 'envoi_telegram_indispo'
+      })
+    }
+  }
+
+  all.push(courrier)
+  writeData('courriers.json', all)
+
+  // Parcours + audit
+  const idx = demandeurs.findIndex(d => d.id === dem_id)
+  if (idx >= 0) {
+    if (!Array.isArray(demandeurs[idx].parcours)) demandeurs[idx].parcours = []
+    demandeurs[idx].parcours.unshift({
+      date: nowDate(),
+      type: 'Courrier officiel',
+      detail: tpl.libelle + (courrier.telegram_envoye ? ' - envoye par Telegram' : ' - archive dossier')
+    })
+    writeData('demandeurs.json', demandeurs)
+  }
+  addLog(req.user, 'COURRIER_CREATION', dem.nom + ' ' + dem.prenom + ' / ' + tpl.libelle)
+  addAudit(req.user, 'demandeur', dem_id, dem.nom + ' ' + dem.prenom, 'courrier_' + statut, [{ label: 'Courrier officiel', avant: '-', apres: tpl.libelle }], 'Courrier officiel : ' + tpl.libelle)
+
+  res.json(courrier)
+})
+
+// Changer le statut d un courrier (reclassification)
+app.put('/api/courriers/:id/statut', requireAuth, (req, res) => {
+  const { statut, motif } = req.body || {}
+  if (!COURRIER_STATUTS.includes(statut)) return res.status(400).json({ error: 'statut invalide' })
+  const all = readData('courriers.json')
+  const idx = all.findIndex(c => c.id === req.params.id)
+  if (idx < 0) return res.status(404).json({ error: 'Courrier introuvable' })
+  const ancien = all[idx].statut
+  all[idx].statut = statut
+  all[idx].libelle_statut = COURRIER_TEMPLATES[statut].libelle
+  all[idx].historique = all[idx].historique || []
+  all[idx].historique.push({
+    date: nowDate(), heure: nowTime(),
+    user: req.user.nom || req.user.login,
+    action: 'changement_statut',
+    statut,
+    ancien,
+    motif: motif || ''
+  })
+  writeData('courriers.json', all)
+  addAudit(req.user, 'courrier', req.params.id, all[idx].dem_nom, 'changement_statut', [{ label: 'Statut courrier', avant: COURRIER_TEMPLATES[ancien].libelle, apres: COURRIER_TEMPLATES[statut].libelle }], motif || ('Changement statut courrier vers ' + COURRIER_TEMPLATES[statut].libelle))
+  res.json(all[idx])
+})
+
+// Supprimer un courrier (directeur uniquement)
+app.delete('/api/courriers/:id', requireAuth, requireRole('directeur'), (req, res) => {
+  const all = readData('courriers.json')
+  const idx = all.findIndex(c => c.id === req.params.id)
+  if (idx < 0) return res.status(404).json({ error: 'Courrier introuvable' })
+  const motif = (req.body && req.body.motif) || ''
+  if (!motif) return res.status(400).json({ error: 'Motif requis', need_motif: true })
+  const removed = all.splice(idx, 1)[0]
+  writeData('courriers.json', all)
+  addAudit(req.user, 'courrier', req.params.id, removed.dem_nom, 'suppression', [], motif)
+  res.json({ ok: true })
+})
+
+// ============================================================
+// TEMPS REEL (SSE + presence + verrouillage doux)
+// ============================================================
+
+/**
+ * SSE endpoint : le token est passe en query string car EventSource
+ * ne permet pas d'envoyer des headers custom.
+ */
+app.get('/api/events', (req, res) => {
+  const token = req.query.token
+  const session = getSession(token)
+  if (!session) {
+    res.status(401).end('Session invalide')
+    return
+  }
+  registerSseClient(res, session.user)
+})
+
+app.get('/api/presence', requireAuth, (req, res) => {
+  res.json({
+    users: rtGetPresence(),
+    connected_count: rtConnectedCount(),
+    locks: rtGetAllLocks()
+  })
+})
+
+app.get('/api/presence/on/:entity_type/:entity_id', requireAuth, (req, res) => {
+  res.json({ users: rtWhoIsOnEntity(req.params.entity_type, req.params.entity_id) })
+})
+
+app.post('/api/presence/viewing', requireAuth, (req, res) => {
+  const { entity_type, entity_id } = req.body || {}
+  rtSetPresence(req.user, {
+    online: true,
+    viewing: entity_type ? { entity_type, entity_id } : null
+  })
+  rtBroadcast('presence_update', rtGetPresence())
+  res.json({ ok: true })
+})
+
+app.post('/api/presence/editing', requireAuth, (req, res) => {
+  const { entity_type, entity_id } = req.body || {}
+  rtSetPresence(req.user, {
+    online: true,
+    editing: entity_type ? { entity_type, entity_id, since: Date.now() } : null
+  })
+  rtBroadcast('presence_update', rtGetPresence())
+  res.json({ ok: true })
+})
+
+app.post('/api/presence/ping', requireAuth, (req, res) => {
+  rtSetPresence(req.user, { online: true })
+  res.json({ ok: true })
+})
+
+app.post('/api/locks/acquire', requireAuth, (req, res) => {
+  const { entity_type, entity_id } = req.body || {}
+  if (!entity_type || !entity_id) return res.status(400).json({ error: 'entity_type et entity_id requis' })
+  const result = rtAcquireLock(req.user, entity_type, entity_id)
+  if (!result.ok) return res.status(409).json(result)
+  res.json(result)
+})
+
+app.post('/api/locks/release', requireAuth, (req, res) => {
+  const { entity_type, entity_id } = req.body || {}
+  if (!entity_type || !entity_id) return res.status(400).json({ error: 'entity_type et entity_id requis' })
+  const result = rtReleaseLock(req.user, entity_type, entity_id)
+  if (!result.ok) return res.status(409).json(result)
+  res.json(result)
+})
+
+app.get('/api/locks', requireAuth, (req, res) => {
+  res.json({ locks: rtGetAllLocks() })
+})
+
+app.get('/api/locks/:entity_type/:entity_id', requireAuth, (req, res) => {
+  res.json({ lock: rtGetLock(req.params.entity_type, req.params.entity_id) })
+})
+
+// ============================================================
+// COMMENTAIRES INTERNES + MENTIONS @user
+// ============================================================
+
+/**
+ * Extrait les mentions @login dans un texte.
+ * Format accepte : @jean.dupont, @claire, @m.ali
+ */
+function extractMentions(texte) {
+  if (!texte || typeof texte !== 'string') return []
+  const re = /@([a-zA-Z0-9._-]{2,40})/g
+  const out = new Set()
+  let m
+  while ((m = re.exec(texte)) !== null) out.add(m[1].toLowerCase())
+  return Array.from(out)
+}
+
+app.get('/api/commentaires/:entity_type/:entity_id', requireAuth, (req, res) => {
+  const all = readData('commentaires.json')
+  const rows = all.filter(c =>
+    c.entity_type === req.params.entity_type &&
+    c.entity_id === req.params.entity_id
+  ).sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
+  res.json(rows)
+})
+
+app.post('/api/commentaires', requireAuth, (req, res) => {
+  const { entity_type, entity_id, texte } = req.body || {}
+  if (!entity_type || !entity_id) return res.status(400).json({ error: 'entity_type et entity_id requis' })
+  if (!texte || !texte.trim()) return res.status(400).json({ error: 'Texte requis' })
+
+  const users = readData('users.json')
+  const mentionsLogins = extractMentions(texte)
+  const mentionedUsers = users
+    .filter(u => u.actif && mentionsLogins.includes((u.login || '').toLowerCase()))
+    .map(u => ({ id: u.id, login: u.login, nom: u.nom, prenom: u.prenom }))
+
+  const all = readData('commentaires.json')
+  const comment = {
+    id: nextId(all, 'CM'),
+    entity_type,
+    entity_id,
+    user_id: req.user.id,
+    user_nom: req.user.nom,
+    user_role: req.user.role,
+    texte: texte.trim(),
+    mentions: mentionedUsers,
+    created_at: new Date().toISOString(),
+    edited_at: null,
+    reactions: {}
+  }
+  all.push(comment)
+  writeData('commentaires.json', all)
+
+  addLog(req.user, 'COMMENTAIRE_AJOUT', entity_type + ':' + entity_id)
+  addAudit(req.user, entity_type, entity_id, '', 'commentaire', [
+    { champ: 'commentaire', ancien: '', nouveau: texte.trim().slice(0, 200) }
+  ], 'Ajout commentaire')
+
+  // broadcast SSE : tout le monde voit le fil rafraichi
+  rtBroadcast('comment_added', { entity_type, entity_id, comment })
+
+  // notifie les utilisateurs mentionnes
+  for (const m of mentionedUsers) {
+    rtBroadcastToUser(m.id, 'mention', {
+      from: { id: req.user.id, nom: req.user.nom, role: req.user.role },
+      entity_type, entity_id,
+      extrait: texte.trim().slice(0, 140),
+      created_at: comment.created_at
+    })
+    // stocke aussi une notif persistante
+    const notifs = readData('notifications.json')
+    notifs.push({
+      id: nextId(notifs, 'NT'),
+      user_id: m.id,
+      type: 'mention',
+      entity_type, entity_id,
+      titre: 'Mention de ' + req.user.nom,
+      message: texte.trim().slice(0, 200),
+      lu: false,
+      created_at: comment.created_at
+    })
+    writeData('notifications.json', notifs)
+  }
+
+  res.json(comment)
+})
+
+app.put('/api/commentaires/:id', requireAuth, (req, res) => {
+  const { texte } = req.body || {}
+  if (!texte || !texte.trim()) return res.status(400).json({ error: 'Texte requis' })
+  const all = readData('commentaires.json')
+  const idx = all.findIndex(c => c.id === req.params.id)
+  if (idx < 0) return res.status(404).json({ error: 'Commentaire introuvable' })
+  const c = all[idx]
+  if (c.user_id !== req.user.id && req.user.role !== 'directeur') {
+    return res.status(403).json({ error: 'Seul l\'auteur ou le directeur peut editer' })
+  }
+  const ancien = c.texte
+  c.texte = texte.trim()
+  c.edited_at = new Date().toISOString()
+  writeData('commentaires.json', all)
+  addAudit(req.user, c.entity_type, c.entity_id, '', 'commentaire_edit', [
+    { champ: 'commentaire', ancien: ancien.slice(0, 200), nouveau: texte.trim().slice(0, 200) }
+  ], 'Edition commentaire')
+  rtBroadcast('comment_edited', { entity_type: c.entity_type, entity_id: c.entity_id, comment: c })
+  res.json(c)
+})
+
+app.delete('/api/commentaires/:id', requireAuth, (req, res) => {
+  const { motif } = req.body || {}
+  if (!motif || !motif.trim()) return res.status(400).json({ error: 'Motif obligatoire', need_motif: true })
+  const all = readData('commentaires.json')
+  const idx = all.findIndex(c => c.id === req.params.id)
+  if (idx < 0) return res.status(404).json({ error: 'Commentaire introuvable' })
+  const c = all[idx]
+  if (c.user_id !== req.user.id && req.user.role !== 'directeur') {
+    return res.status(403).json({ error: 'Seul l\'auteur ou le directeur peut supprimer' })
+  }
+  all.splice(idx, 1)
+  writeData('commentaires.json', all)
+  addAudit(req.user, c.entity_type, c.entity_id, '', 'commentaire_suppression', [], motif)
+  rtBroadcast('comment_deleted', { entity_type: c.entity_type, entity_id: c.entity_id, comment_id: c.id })
+  res.json({ ok: true })
+})
+
+app.post('/api/commentaires/:id/reaction', requireAuth, (req, res) => {
+  const { emoji } = req.body || {}
+  if (!emoji) return res.status(400).json({ error: 'emoji requis' })
+  const all = readData('commentaires.json')
+  const c = all.find(x => x.id === req.params.id)
+  if (!c) return res.status(404).json({ error: 'Commentaire introuvable' })
+  c.reactions = c.reactions || {}
+  c.reactions[emoji] = c.reactions[emoji] || []
+  const i = c.reactions[emoji].indexOf(req.user.id)
+  if (i >= 0) c.reactions[emoji].splice(i, 1)
+  else c.reactions[emoji].push(req.user.id)
+  if (c.reactions[emoji].length === 0) delete c.reactions[emoji]
+  writeData('commentaires.json', all)
+  rtBroadcast('comment_edited', { entity_type: c.entity_type, entity_id: c.entity_id, comment: c })
+  res.json(c)
+})
+
+// notifications persistees (mentions, etc.)
+app.get('/api/mes-notifications', requireAuth, (req, res) => {
+  const all = readData('notifications.json')
+  const mine = all.filter(n => n.user_id === req.user.id)
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+  res.json({
+    total: mine.length,
+    non_lues: mine.filter(n => !n.lu).length,
+    notifications: mine.slice(0, 100)
+  })
+})
+
+app.put('/api/mes-notifications/lire-tout', requireAuth, (req, res) => {
+  const all = readData('notifications.json')
+  let n = 0
+  for (const it of all) {
+    if (it.user_id === req.user.id && !it.lu) { it.lu = true; n++ }
+  }
+  writeData('notifications.json', all)
+  res.json({ ok: true, marquees: n })
+})
+
+app.put('/api/mes-notifications/:id/lire', requireAuth, (req, res) => {
+  const all = readData('notifications.json')
+  const n = all.find(x => x.id === req.params.id && x.user_id === req.user.id)
+  if (!n) return res.status(404).json({ error: 'Notification introuvable' })
+  n.lu = true
+  writeData('notifications.json', all)
+  res.json(n)
+})
+
+// ============================================================
+// PIECES JUSTIFICATIVES + OCR AUTO-DETECTION
+// ============================================================
+
+/**
+ * Classes de pieces attendues pour un dossier logement social.
+ * Chaque classe a des mots-cles qui permettent l'auto-detection par OCR.
+ */
+const PIECE_TYPES = {
+  piece_identite: {
+    libelle: 'Piece d\'identite',
+    icone: 'badge',
+    obligatoire: true,
+    mots_cles: ['carte nationale', 'identite', 'passeport', 'titre de sejour', 'cni']
+  },
+  livret_famille: {
+    libelle: 'Livret de famille',
+    icone: 'family_restroom',
+    obligatoire: false,
+    mots_cles: ['livret de famille', 'mariage', 'naissance']
+  },
+  avis_imposition: {
+    libelle: 'Avis d\'imposition',
+    icone: 'receipt_long',
+    obligatoire: true,
+    mots_cles: ['avis d\'impot', 'impot sur le revenu', 'revenu fiscal de reference', 'direction generale des finances', 'rfr']
+  },
+  bulletins_salaire: {
+    libelle: 'Bulletins de salaire (3 derniers)',
+    icone: 'payments',
+    obligatoire: true,
+    mots_cles: ['bulletin de salaire', 'net a payer', 'cotisations', 'employeur', 'siret']
+  },
+  attestation_caf: {
+    libelle: 'Attestation CAF',
+    icone: 'family_restroom',
+    obligatoire: false,
+    mots_cles: ['caisse d\'allocations familiales', 'caf', 'allocations', 'quotient familial', 'paje']
+  },
+  attestation_pole_emploi: {
+    libelle: 'Attestation Pole Emploi',
+    icone: 'work_off',
+    obligatoire: false,
+    mots_cles: ['pole emploi', 'france travail', 'allocation de retour', 'are', 'demandeur d\'emploi']
+  },
+  justificatif_domicile: {
+    libelle: 'Justificatif de domicile',
+    icone: 'home',
+    obligatoire: true,
+    mots_cles: ['facture', 'edf', 'engie', 'veolia', 'orange', 'bouygues', 'quittance de loyer']
+  },
+  rib: {
+    libelle: 'RIB',
+    icone: 'account_balance',
+    obligatoire: false,
+    mots_cles: ['releve d\'identite bancaire', 'rib', 'iban', 'bic']
+  },
+  certificat_scolarite: {
+    libelle: 'Certificat de scolarite',
+    icone: 'school',
+    obligatoire: false,
+    mots_cles: ['certificat de scolarite', 'inscription', 'ecole', 'college', 'lycee', 'universite', 'rectorat']
+  },
+  mdph: {
+    libelle: 'Notification MDPH',
+    icone: 'accessible',
+    obligatoire: false,
+    mots_cles: ['mdph', 'maison departementale des personnes handicapees', 'aah', 'pch', 'taux d\'incapacite']
+  },
+  jugement_divorce: {
+    libelle: 'Jugement / ordonnance',
+    icone: 'gavel',
+    obligatoire: false,
+    mots_cles: ['tribunal', 'jugement', 'divorce', 'ordonnance', 'juge aux affaires familiales', 'jaf']
+  },
+  attestation_hebergement: {
+    libelle: 'Attestation d\'hebergement',
+    icone: 'hotel',
+    obligatoire: false,
+    mots_cles: ['attestation d\'hebergement', 'herberge', 'hebergeur']
+  },
+  dalo: {
+    libelle: 'Decision DALO',
+    icone: 'verified',
+    obligatoire: false,
+    mots_cles: ['dalo', 'droit au logement opposable', 'commission de mediation']
+  },
+  autre: {
+    libelle: 'Autre piece',
+    icone: 'attach_file',
+    obligatoire: false,
+    mots_cles: []
+  }
+}
+
+function detectPieceType(texteOuNomFichier) {
+  const txt = (texteOuNomFichier || '').toLowerCase()
+  let meilleur = { type: 'autre', score: 0, motsTrouves: [] }
+  for (const [type, def] of Object.entries(PIECE_TYPES)) {
+    const trouves = def.mots_cles.filter(mc => txt.includes(mc))
+    if (trouves.length > meilleur.score) {
+      meilleur = { type, score: trouves.length, motsTrouves: trouves }
+    }
+  }
+  return meilleur
+}
+
+app.get('/api/pieces/types', requireAuth, (req, res) => {
+  res.json(PIECE_TYPES)
+})
+
+app.get('/api/pieces/:dem_id', requireAuth, (req, res) => {
+  const all = readData('pieces.json')
+  const dem_pieces = all.filter(p => p.dem_id === req.params.dem_id)
+    .sort((a, b) => (b.uploaded_at || '').localeCompare(a.uploaded_at || ''))
+  // checklist des pieces obligatoires manquantes
+  const presents = new Set(dem_pieces.filter(p => p.statut !== 'refusee').map(p => p.type))
+  const manquantes = Object.entries(PIECE_TYPES)
+    .filter(([k, v]) => v.obligatoire && !presents.has(k))
+    .map(([k, v]) => ({ type: k, libelle: v.libelle, icone: v.icone }))
+  res.json({ pieces: dem_pieces, manquantes, total: dem_pieces.length })
+})
+
+app.post('/api/pieces', requireAuth, (req, res) => {
+  const {
+    dem_id,
+    nom_fichier,
+    mime,
+    taille,
+    contenu_base64,
+    texte_extrait,
+    type_force
+  } = req.body || {}
+
+  if (!dem_id) return res.status(400).json({ error: 'dem_id requis' })
+  if (!nom_fichier) return res.status(400).json({ error: 'nom_fichier requis' })
+
+  const demandeurs = readData('demandeurs.json')
+  const dem = demandeurs.find(d => d.id === dem_id)
+  if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
+
+  // auto-detection : on combine le nom du fichier et le texte OCR extrait cote client
+  const sourceDetection = (nom_fichier + ' ' + (texte_extrait || '')).toLowerCase()
+  const detection = detectPieceType(sourceDetection)
+  const type = type_force && PIECE_TYPES[type_force] ? type_force : detection.type
+
+  const all = readData('pieces.json')
+  const piece = {
+    id: nextId(all, 'PJ'),
+    dem_id,
+    dem_nom: dem.nom + ' ' + (dem.prenom || ''),
+    nom_fichier,
+    mime: mime || 'application/octet-stream',
+    taille: typeof taille === 'number' ? taille : 0,
+    type,
+    type_detecte: detection.type,
+    detection_confiance: detection.score,
+    detection_mots_trouves: detection.motsTrouves,
+    type_force: !!type_force,
+    texte_extrait: (texte_extrait || '').slice(0, 5000),
+    // on stocke le contenu base64 pour relecture, mais tronque si trop gros
+    contenu_base64: (contenu_base64 || '').slice(0, 2 * 1024 * 1024),
+    statut: 'a_valider',
+    uploaded_by: req.user.id,
+    uploaded_by_nom: req.user.nom,
+    uploaded_at: new Date().toISOString(),
+    valide_par: null,
+    valide_le: null,
+    motif_refus: null
+  }
+  all.push(piece)
+  writeData('pieces.json', all)
+
+  addLog(req.user, 'PIECE_UPLOAD', dem_id + ' : ' + nom_fichier + ' (type: ' + type + ')')
+  addAudit(req.user, 'demandeur', dem_id, dem.nom, 'piece_ajout', [
+    { champ: 'piece', ancien: '', nouveau: nom_fichier + ' (' + (PIECE_TYPES[type]?.libelle || type) + ')' }
+  ], 'Upload piece justificative')
+
+  rtBroadcast('piece_uploaded', { dem_id, piece: { ...piece, contenu_base64: undefined } })
+  res.json(piece)
+})
+
+app.put('/api/pieces/:id/valider', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const all = readData('pieces.json')
+  const p = all.find(x => x.id === req.params.id)
+  if (!p) return res.status(404).json({ error: 'Piece introuvable' })
+  p.statut = 'validee'
+  p.valide_par = req.user.nom
+  p.valide_le = new Date().toISOString()
+  p.motif_refus = null
+  writeData('pieces.json', all)
+  addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_validation', [
+    { champ: 'piece_' + p.type, ancien: 'a_valider', nouveau: 'validee' }
+  ], 'Validation piece')
+  rtBroadcast('piece_updated', { dem_id: p.dem_id, piece: { ...p, contenu_base64: undefined } })
+  res.json(p)
+})
+
+app.put('/api/pieces/:id/refuser', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const { motif } = req.body || {}
+  if (!motif || !motif.trim()) return res.status(400).json({ error: 'Motif obligatoire', need_motif: true })
+  const all = readData('pieces.json')
+  const p = all.find(x => x.id === req.params.id)
+  if (!p) return res.status(404).json({ error: 'Piece introuvable' })
+  p.statut = 'refusee'
+  p.valide_par = req.user.nom
+  p.valide_le = new Date().toISOString()
+  p.motif_refus = motif.trim()
+  writeData('pieces.json', all)
+  addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_refus', [
+    { champ: 'piece_' + p.type, ancien: 'a_valider', nouveau: 'refusee' }
+  ], motif)
+  rtBroadcast('piece_updated', { dem_id: p.dem_id, piece: { ...p, contenu_base64: undefined } })
+  res.json(p)
+})
+
+app.put('/api/pieces/:id/reclassifier', requireAuth, (req, res) => {
+  const { type } = req.body || {}
+  if (!type || !PIECE_TYPES[type]) return res.status(400).json({ error: 'Type inconnu' })
+  const all = readData('pieces.json')
+  const p = all.find(x => x.id === req.params.id)
+  if (!p) return res.status(404).json({ error: 'Piece introuvable' })
+  const ancien = p.type
+  p.type = type
+  p.type_force = true
+  writeData('pieces.json', all)
+  addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_reclassification', [
+    { champ: 'type', ancien, nouveau: type }
+  ], 'Reclassification manuelle')
+  rtBroadcast('piece_updated', { dem_id: p.dem_id, piece: { ...p, contenu_base64: undefined } })
+  res.json(p)
+})
+
+app.delete('/api/pieces/:id', requireAuth, (req, res) => {
+  const { motif } = req.body || {}
+  if (!motif || !motif.trim()) return res.status(400).json({ error: 'Motif obligatoire', need_motif: true })
+  const all = readData('pieces.json')
+  const idx = all.findIndex(x => x.id === req.params.id)
+  if (idx < 0) return res.status(404).json({ error: 'Piece introuvable' })
+  const p = all[idx]
+  if (p.uploaded_by !== req.user.id && req.user.role !== 'directeur') {
+    return res.status(403).json({ error: 'Seul l\'auteur ou le directeur peut supprimer' })
+  }
+  all.splice(idx, 1)
+  writeData('pieces.json', all)
+  addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_suppression', [], motif)
+  rtBroadcast('piece_deleted', { dem_id: p.dem_id, piece_id: p.id })
+  res.json({ ok: true })
+})
+
+app.get('/api/pieces/:id/contenu', requireAuth, (req, res) => {
+  const all = readData('pieces.json')
+  const p = all.find(x => x.id === req.params.id)
+  if (!p) return res.status(404).json({ error: 'Piece introuvable' })
+  res.json({
+    id: p.id,
+    nom_fichier: p.nom_fichier,
+    mime: p.mime,
+    contenu_base64: p.contenu_base64 || ''
+  })
+})
+
+// ============================================================
+// WORKFLOW KANBAN (etapes dossier)
+// ============================================================
+
+const WORKFLOW_ETAPES = [
+  { id: 'reception',    libelle: 'Reception',       couleur: '#64748b', ordre: 1, description: 'Demande enregistree, piece(s) en cours de collecte' },
+  { id: 'instruction',  libelle: 'Instruction',     couleur: '#3b82f6', ordre: 2, description: 'Analyse des pieces, verification des criteres' },
+  { id: 'cotation',     libelle: 'Cotation',        couleur: '#8b5cf6', ordre: 3, description: 'Calcul du score et priorisation' },
+  { id: 'cal',          libelle: 'CAL programmee',  couleur: '#f59e0b', ordre: 4, description: 'Passage en commission d\'attribution' },
+  { id: 'attribution',  libelle: 'Attribution',     couleur: '#10b981', ordre: 5, description: 'Logement propose au candidat' },
+  { id: 'notification', libelle: 'Notification',    couleur: '#06b6d4', ordre: 6, description: 'Courrier / Telegram envoye' },
+  { id: 'signature',    libelle: 'Bail signe',      couleur: '#16a34a', ordre: 7, description: 'Dossier finalise' },
+  { id: 'archive',      libelle: 'Archive',         couleur: '#94a3b8', ordre: 8, description: 'Dossier cloture' }
+]
+
+app.get('/api/workflow/etapes', requireAuth, (req, res) => {
+  res.json(WORKFLOW_ETAPES)
+})
+
+app.get('/api/workflow/kanban', requireAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const pieces = readData('pieces.json')
+  const byEtape = {}
+  for (const e of WORKFLOW_ETAPES) byEtape[e.id] = []
+  for (const d of demandeurs) {
+    if (d.archive) continue
+    const etape = d.workflow_etape || 'reception'
+    if (!byEtape[etape]) byEtape[etape] = []
+    const dem_pieces = pieces.filter(p => p.dem_id === d.id)
+    const nbPiecesValid = dem_pieces.filter(p => p.statut === 'validee').length
+    const piecesObligatoires = Object.values(PIECE_TYPES).filter(x => x.obligatoire).length
+    byEtape[etape].push({
+      id: d.id,
+      nom: d.nom + ' ' + (d.prenom || ''),
+      score: d.score || 0,
+      typologie: d.typologie || '',
+      composition: d.composition_familiale || '',
+      dalo: d.dalo || false,
+      urgence: d.urgence || 'normale',
+      nb_pieces_validees: nbPiecesValid,
+      nb_pieces_obligatoires: piecesObligatoires,
+      date_depot: d.date_depot || d.created_at || null,
+      quartier: d.quartier_souhaite || ''
+    })
+  }
+  res.json({
+    etapes: WORKFLOW_ETAPES,
+    colonnes: byEtape,
+    total: demandeurs.filter(d => !d.archive).length
+  })
+})
+
+app.put('/api/workflow/deplacer/:dem_id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const { etape, motif } = req.body || {}
+  if (!etape) return res.status(400).json({ error: 'etape requise' })
+  const etapeObj = WORKFLOW_ETAPES.find(e => e.id === etape)
+  if (!etapeObj) return res.status(400).json({ error: 'Etape inconnue' })
+
+  const demandeurs = readData('demandeurs.json')
+  const dem = demandeurs.find(d => d.id === req.params.dem_id)
+  if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
+
+  const ancienne = dem.workflow_etape || 'reception'
+  if (ancienne === etape) return res.json(dem)
+
+  dem.workflow_etape = etape
+  dem.workflow_etape_at = new Date().toISOString()
+  dem.workflow_etape_par = req.user.nom
+  writeData('demandeurs.json', demandeurs)
+
+  addLog(req.user, 'WORKFLOW_ETAPE', dem.id + ' : ' + ancienne + ' -> ' + etape)
+  addAudit(req.user, 'demandeur', dem.id, dem.nom, 'workflow', [
+    { champ: 'etape', ancien: ancienne, nouveau: etape }
+  ], motif || 'Deplacement kanban')
+
+  rtBroadcast('workflow_moved', {
+    dem_id: dem.id,
+    nom: dem.nom + ' ' + (dem.prenom || ''),
+    ancienne,
+    nouvelle: etape,
+    par: req.user.nom
+  })
+
+  res.json(dem)
+})
+
+// ============================================================
+// MESSAGERIE INTERNE (agent - candidat - elu) par dossier
+// ============================================================
+
+app.get('/api/messages/:dem_id', requireAuth, (req, res) => {
+  const all = readData('messages.json')
+  const msgs = all.filter(m => m.dem_id === req.params.dem_id)
+    .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
+  // marque comme lu pour l'utilisateur courant
+  let modifie = false
+  for (const m of msgs) {
+    m.lu_par = m.lu_par || []
+    if (!m.lu_par.includes(req.user.id) && m.from_user_id !== req.user.id) {
+      m.lu_par.push(req.user.id)
+      modifie = true
+    }
+  }
+  if (modifie) writeData('messages.json', all)
+  res.json(msgs)
+})
+
+app.post('/api/messages', requireAuth, (req, res) => {
+  const { dem_id, texte, destinataires, canal } = req.body || {}
+  if (!dem_id) return res.status(400).json({ error: 'dem_id requis' })
+  if (!texte || !texte.trim()) return res.status(400).json({ error: 'texte requis' })
+
+  const demandeurs = readData('demandeurs.json')
+  const dem = demandeurs.find(d => d.id === dem_id)
+  if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
+
+  const all = readData('messages.json')
+  const message = {
+    id: nextId(all, 'MS'),
+    dem_id,
+    from_user_id: req.user.id,
+    from_user_nom: req.user.nom,
+    from_role: req.user.role,
+    canal: canal || 'interne', // interne | sms | email | telegram
+    destinataires: Array.isArray(destinataires) ? destinataires : [],
+    texte: texte.trim(),
+    created_at: new Date().toISOString(),
+    lu_par: [req.user.id],
+    tracking: {
+      envoye: true,
+      livre: null,
+      lu: null,
+      erreur: null
+    }
+  }
+  all.push(message)
+  writeData('messages.json', all)
+
+  // broadcast pour MAJ temps reel de la conversation
+  rtBroadcast('message_sent', { dem_id, message })
+
+  // notifie les destinataires s'ils sont connectes
+  for (const uid of message.destinataires) {
+    rtBroadcastToUser(uid, 'message_recu', { dem_id, from: req.user.nom, extrait: texte.slice(0, 140) })
+  }
+
+  addLog(req.user, 'MESSAGE_INTERNE', dem_id + ' : ' + message.destinataires.length + ' destinataire(s)')
+
+  // si canal = telegram et qu'on a un chat_id du candidat, on envoie
+  if (canal === 'telegram') {
+    const chat = tgGetChatId('demandeur', dem_id)
+    if (chat) {
+      tgSend(chat, '<b>Message de ' + req.user.nom + '</b>\n\n' + texte).catch(() => {})
+      message.tracking.livre = new Date().toISOString()
+      writeData('messages.json', all)
+    } else {
+      message.tracking.erreur = 'Chat Telegram non enregistre'
+      writeData('messages.json', all)
+    }
+  }
+
+  res.json(message)
+})
+
+app.get('/api/mes-conversations', requireAuth, (req, res) => {
+  const all = readData('messages.json')
+  const demandeurs = readData('demandeurs.json')
+  // mine = conversations ou je suis expediteur OU destinataire
+  const mine = all.filter(m =>
+    m.from_user_id === req.user.id ||
+    (m.destinataires || []).includes(req.user.id)
+  )
+  // group by dem_id
+  const byDem = {}
+  for (const m of mine) {
+    byDem[m.dem_id] = byDem[m.dem_id] || []
+    byDem[m.dem_id].push(m)
+  }
+  const conv = Object.entries(byDem).map(([dem_id, msgs]) => {
+    msgs.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+    const dem = demandeurs.find(d => d.id === dem_id)
+    const dernier = msgs[0]
+    const nonLus = msgs.filter(m =>
+      m.from_user_id !== req.user.id &&
+      !(m.lu_par || []).includes(req.user.id)
+    ).length
+    return {
+      dem_id,
+      dem_nom: dem ? (dem.nom + ' ' + (dem.prenom || '')) : '(dossier supprime)',
+      dernier_message: dernier.texte.slice(0, 140),
+      dernier_auteur: dernier.from_user_nom,
+      dernier_at: dernier.created_at,
+      non_lus: nonLus,
+      total: msgs.length
+    }
+  })
+  conv.sort((a, b) => (b.dernier_at || '').localeCompare(a.dernier_at || ''))
+  res.json(conv)
+})
+
+// ============================================================
+// RELANCES AUTOMATIQUES
+// ============================================================
+
+const RELANCE_REGLES = [
+  { id: 'piece_manquante_7', libelle: 'Piece manquante J+7',  delai_jours: 7,  type: 'piece', titre: 'Pieces manquantes' },
+  { id: 'candidat_silence_15', libelle: 'Silence candidat J+15', delai_jours: 15, type: 'reponse_candidat', titre: 'Pas de reponse candidat' },
+  { id: 'dossier_inactif_30', libelle: 'Dossier inactif J+30', delai_jours: 30, type: 'inactivite', titre: 'Dossier sans mise a jour' },
+  { id: 'post_cal_7', libelle: 'Post-CAL J+7 (sans signature)', delai_jours: 7, type: 'post_cal', titre: 'Attribution sans signature' }
+]
+
+app.get('/api/relances/regles', requireAuth, (req, res) => {
+  res.json(RELANCE_REGLES)
+})
+
+app.get('/api/relances', requireAuth, (req, res) => {
+  const all = readData('relances.json')
+  res.json(all.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')))
+})
+
+/**
+ * Calcule les relances a faire MAINTENANT en scannant les demandeurs.
+ * Ne persiste QUE les nouvelles relances.
+ */
+app.post('/api/relances/analyser', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const pieces = readData('pieces.json')
+  const messages = readData('messages.json')
+  const relances = readData('relances.json')
+  const nouvelles = []
+  const now = Date.now()
+  const joursMs = 24 * 3600 * 1000
+
+  const dejaRelance = (dem_id, type) => {
+    const recent = relances.find(r =>
+      r.dem_id === dem_id &&
+      r.regle === type &&
+      (now - new Date(r.created_at).getTime()) < 7 * joursMs
+    )
+    return !!recent
+  }
+
+  for (const d of demandeurs) {
+    if (d.archive) continue
+
+    // Regle 1 : piece manquante depuis > 7j
+    const piecesObl = Object.entries(PIECE_TYPES).filter(([k, v]) => v.obligatoire)
+    const dem_pieces = pieces.filter(p => p.dem_id === d.id && p.statut !== 'refusee')
+    const presents = new Set(dem_pieces.map(p => p.type))
+    const manquantes = piecesObl.filter(([k]) => !presents.has(k)).map(([k, v]) => v.libelle)
+    if (manquantes.length > 0) {
+      const depotAge = d.date_depot ? (now - new Date(d.date_depot).getTime()) / joursMs : 999
+      if (depotAge > 7 && !dejaRelance(d.id, 'piece_manquante_7')) {
+        nouvelles.push({
+          id: nextId(relances, 'RL'),
+          dem_id: d.id,
+          dem_nom: d.nom + ' ' + (d.prenom || ''),
+          regle: 'piece_manquante_7',
+          titre: 'Pieces manquantes depuis plus de 7 jours',
+          detail: manquantes.join(', '),
+          created_at: new Date().toISOString(),
+          traitee: false,
+          traitee_par: null,
+          traitee_le: null
+        })
+      }
+    }
+
+    // Regle 2 : silence candidat J+15 - dernier message du candidat trop ancien
+    const msgsDem = messages.filter(m => m.dem_id === d.id)
+    const dernierCandidat = msgsDem.filter(m => m.from_role === 'candidat' || m.canal === 'telegram')
+      .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))[0]
+    if (dernierCandidat) {
+      const age = (now - new Date(dernierCandidat.created_at).getTime()) / joursMs
+      if (age > 15 && !dejaRelance(d.id, 'candidat_silence_15')) {
+        nouvelles.push({
+          id: nextId(relances, 'RL'),
+          dem_id: d.id,
+          dem_nom: d.nom + ' ' + (d.prenom || ''),
+          regle: 'candidat_silence_15',
+          titre: 'Silence candidat > 15 jours',
+          detail: 'Dernier contact : ' + dernierCandidat.created_at.slice(0, 10),
+          created_at: new Date().toISOString(),
+          traitee: false,
+          traitee_par: null,
+          traitee_le: null
+        })
+      }
+    }
+
+    // Regle 3 : dossier inactif 30j
+    const lastAudit = d.updated_at || d.created_at || d.date_depot
+    if (lastAudit) {
+      const age = (now - new Date(lastAudit).getTime()) / joursMs
+      if (age > 30 && !dejaRelance(d.id, 'dossier_inactif_30')) {
+        nouvelles.push({
+          id: nextId(relances, 'RL'),
+          dem_id: d.id,
+          dem_nom: d.nom + ' ' + (d.prenom || ''),
+          regle: 'dossier_inactif_30',
+          titre: 'Dossier sans mise a jour > 30 jours',
+          detail: 'Derniere MAJ : ' + lastAudit.slice(0, 10),
+          created_at: new Date().toISOString(),
+          traitee: false,
+          traitee_par: null,
+          traitee_le: null
+        })
+      }
+    }
+
+    // Regle 4 : post-CAL, attribution sans signature > 7j
+    if (d.workflow_etape === 'attribution' && d.workflow_etape_at) {
+      const age = (now - new Date(d.workflow_etape_at).getTime()) / joursMs
+      if (age > 7 && !dejaRelance(d.id, 'post_cal_7')) {
+        nouvelles.push({
+          id: nextId(relances, 'RL'),
+          dem_id: d.id,
+          dem_nom: d.nom + ' ' + (d.prenom || ''),
+          regle: 'post_cal_7',
+          titre: 'Attribution sans signature > 7 jours',
+          detail: 'En attribution depuis ' + d.workflow_etape_at.slice(0, 10),
+          created_at: new Date().toISOString(),
+          traitee: false,
+          traitee_par: null,
+          traitee_le: null
+        })
+      }
+    }
+  }
+
+  if (nouvelles.length > 0) {
+    const all = [...relances, ...nouvelles]
+    writeData('relances.json', all)
+    addLog(req.user, 'RELANCES_ANALYSE', nouvelles.length + ' nouvelles')
+    rtBroadcast('relances_generees', { nb: nouvelles.length })
+  }
+
+  res.json({
+    ok: true,
+    nouvelles: nouvelles.length,
+    total: readData('relances.json').filter(r => !r.traitee).length,
+    detail: nouvelles
+  })
+})
+
+app.put('/api/relances/:id/traiter', requireAuth, (req, res) => {
+  const { action, commentaire } = req.body || {}
+  const all = readData('relances.json')
+  const r = all.find(x => x.id === req.params.id)
+  if (!r) return res.status(404).json({ error: 'Relance introuvable' })
+  r.traitee = true
+  r.traitee_par = req.user.nom
+  r.traitee_le = new Date().toISOString()
+  r.action = action || 'fait'
+  r.commentaire = commentaire || ''
+  writeData('relances.json', all)
+  addAudit(req.user, 'demandeur', r.dem_id, r.dem_nom, 'relance_traitee', [], r.titre + ' / ' + (action || 'fait'))
+  res.json(r)
+})
+
+// ============================================================
+// PV CAL - generation HTML imprimable (type PDF)
+// ============================================================
+
+app.get('/api/cal/pv/:decision_id', requireAuth, (req, res) => {
+  const decisions = readData('decisions_cal.json')
+  const dec = decisions.find(d => d.id === req.params.decision_id)
+  if (!dec) return res.status(404).json({ error: 'Decision introuvable' })
+
+  const demandeurs = readData('demandeurs.json')
+  const logements = readData('logements.json')
+  const elus = readData('referentiels.json') // pas exact, selon le schema
+  const logement = logements.find(l => l.id === dec.logement_id) || {}
+  const candidats = (dec.candidats || []).map(c => {
+    const d = demandeurs.find(x => x.id === c.dem_id) || {}
+    return { ...c, nom: d.nom, prenom: d.prenom, score: d.score, typologie: d.typologie }
+  })
+
+  const style = `
+    body { font-family: 'Helvetica Neue', Arial, sans-serif; color: #111; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    h1 { border-bottom: 3px solid #1e3a8a; padding-bottom: 8px; color: #1e3a8a; }
+    h2 { color: #1e3a8a; margin-top: 28px; }
+    .entete { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+    .logo { font-weight: bold; font-size: 20px; color: #1e3a8a; }
+    .meta { background: #f1f5f9; padding: 16px; border-radius: 8px; margin: 16px 0; }
+    .meta dt { font-weight: 600; display: inline-block; min-width: 180px; color: #475569; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    th { background: #1e3a8a; color: white; padding: 10px; text-align: left; }
+    td { border-bottom: 1px solid #e2e8f0; padding: 8px 10px; }
+    tr.retenu { background: #dcfce7; font-weight: 600; }
+    .decision { background: #fef3c7; border-left: 4px solid #f59e0b; padding: 16px; margin: 20px 0; }
+    .signatures { display: flex; justify-content: space-between; margin-top: 60px; }
+    .sig { text-align: center; border-top: 1px solid #000; padding-top: 8px; width: 220px; }
+    .footer { margin-top: 40px; font-size: 11px; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 10px; }
+    @media print { body { margin: 0; } .no-print { display: none; } }
+  `
+
+  const dateFr = new Date(dec.date || Date.now()).toLocaleDateString('fr-FR')
+
+  const html = `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>PV CAL ${dec.id} - ${dec.nom_commission || ''}</title>
+<style>${style}</style>
+</head>
+<body>
+<div class="no-print" style="margin: 10px 0; text-align: right;">
+  <button onclick="window.print()" style="padding: 8px 16px; background: #1e3a8a; color: white; border: none; border-radius: 6px; cursor: pointer;">Imprimer / PDF</button>
+</div>
+<div class="entete">
+  <div class="logo">Logivia &middot; Ville de Saint-Denis</div>
+  <div style="text-align: right; font-size: 12px; color: #64748b;">
+    Reference : ${dec.id}<br>
+    Edition : ${new Date().toLocaleString('fr-FR')}
+  </div>
+</div>
+<h1>Proces-verbal de la Commission d'Attribution des Logements</h1>
+<div class="meta">
+  <dt>Date :</dt> ${dateFr}<br>
+  <dt>Commission :</dt> ${dec.nom_commission || 'CAL'}<br>
+  <dt>President :</dt> ${dec.president || '(non renseigne)'}<br>
+  <dt>Bailleur :</dt> ${logement.bailleur || '(non renseigne)'}
+</div>
+
+<h2>Logement concerne</h2>
+<div class="meta">
+  <dt>Reference :</dt> ${logement.id || ''}<br>
+  <dt>Adresse :</dt> ${logement.adresse || ''} - ${logement.code_postal || ''} ${logement.ville || ''}<br>
+  <dt>Typologie :</dt> ${logement.typologie || ''} - ${logement.surface || '?'} m<sup>2</sup><br>
+  <dt>Loyer :</dt> ${logement.loyer || '?'} &euro; / mois<br>
+  <dt>Financement :</dt> ${logement.financement || '(non renseigne)'}
+</div>
+
+<h2>Candidats examines (${candidats.length})</h2>
+<table>
+<thead>
+<tr><th>Rang</th><th>Candidat</th><th>Composition</th><th>Score</th><th>Typologie demandee</th><th>Decision</th></tr>
+</thead>
+<tbody>
+${candidats.map((c, i) => `
+  <tr class="${c.statut === 'retenu' ? 'retenu' : ''}">
+    <td>${i + 1}</td>
+    <td>${c.nom || ''} ${c.prenom || ''}</td>
+    <td>${c.composition || '-'}</td>
+    <td>${c.score || 0}</td>
+    <td>${c.typologie || '-'}</td>
+    <td><b>${(c.statut || 'examine').toUpperCase()}</b></td>
+  </tr>
+`).join('')}
+</tbody>
+</table>
+
+<div class="decision">
+  <b>Decision de la commission :</b><br>
+  ${dec.decision_texte || 'Decision non renseignee.'}
+</div>
+
+${dec.motif ? `<p><b>Motif :</b> ${dec.motif}</p>` : ''}
+
+<div class="signatures">
+  <div class="sig">Le President<br>${dec.president || ''}</div>
+  <div class="sig">Le Rapporteur<br>&nbsp;</div>
+  <div class="sig">Le Secretaire<br>&nbsp;</div>
+</div>
+
+<div class="footer">
+  PV genere automatiquement par Logivia v3.0 - Ville de Saint-Denis.<br>
+  Conformement au Code de la construction et de l'habitation, art. L441-2, ce PV est a conserver 10 ans.<br>
+  Signature electronique eIDAS : en attente d'integration (DocuSign / Yousign).
+</div>
+</body>
+</html>`
+
+  res.type('html').send(html)
+})
+
+// ============================================================
+// IA PREDICTIVE - estimation delai d'attribution
+// ============================================================
+
+/**
+ * Modele simple base sur les demandeurs passes deja attribues.
+ * Clustering par typologie + tranche de composition + DALO.
+ */
+function calculerDelaiMoyen(demandeurs, critere) {
+  const attribuees = demandeurs.filter(d =>
+    d.workflow_etape === 'signature' &&
+    d.date_depot && d.workflow_etape_at &&
+    critere(d)
+  )
+  if (attribuees.length === 0) return null
+  const delais = attribuees.map(d => {
+    const dep = new Date(d.date_depot).getTime()
+    const att = new Date(d.workflow_etape_at).getTime()
+    return Math.max(0, (att - dep) / (1000 * 3600 * 24))
+  })
+  delais.sort((a, b) => a - b)
+  const moy = delais.reduce((s, x) => s + x, 0) / delais.length
+  const median = delais[Math.floor(delais.length / 2)]
+  return {
+    echantillon: attribuees.length,
+    delai_moyen_jours: Math.round(moy),
+    delai_median_jours: Math.round(median),
+    delai_min_jours: Math.round(delais[0]),
+    delai_max_jours: Math.round(delais[delais.length - 1])
+  }
+}
+
+app.post('/api/ia/predict-delai', requireAuth, (req, res) => {
+  const { typologie, composition, dalo, score, prioritaire } = req.body || {}
+  const demandeurs = readData('demandeurs.json')
+
+  // 1. meme typologie + DALO
+  const niv1 = calculerDelaiMoyen(demandeurs, d =>
+    d.typologie === typologie && !!d.dalo === !!dalo
+  )
+  // 2. meme typologie uniquement
+  const niv2 = calculerDelaiMoyen(demandeurs, d => d.typologie === typologie)
+  // 3. global
+  const niv3 = calculerDelaiMoyen(demandeurs, () => true)
+
+  const meilleur = niv1 || niv2 || niv3
+  if (!meilleur) {
+    return res.json({
+      disponible: false,
+      message: 'Pas assez de donnees historiques pour une prediction fiable.'
+    })
+  }
+
+  // ajustements selon score et DALO (heuristiques)
+  let ajuste = meilleur.delai_moyen_jours
+  if (score && score > 200) ajuste = Math.round(ajuste * 0.75)
+  if (score && score > 350) ajuste = Math.round(ajuste * 0.6)
+  if (dalo) ajuste = Math.round(ajuste * 0.5)
+  if (prioritaire) ajuste = Math.round(ajuste * 0.65)
+
+  // signaux faibles : candidats similaires actuellement bloques
+  const similaires = demandeurs.filter(d =>
+    d.typologie === typologie &&
+    !d.archive &&
+    d.workflow_etape &&
+    d.workflow_etape !== 'signature' &&
+    d.workflow_etape !== 'archive'
+  )
+  const enAttente = similaires.length
+
+  const signaux = []
+  if (enAttente > 20) signaux.push({ niveau: 'alerte', texte: enAttente + ' candidats en file d\'attente pour ce profil typologique' })
+  if (niv1 && niv1.echantillon < 3) signaux.push({ niveau: 'info', texte: 'Peu de dossiers similaires historises (' + niv1.echantillon + '). Prediction a prendre avec prudence.' })
+  if (!dalo && !prioritaire && ajuste > 365) signaux.push({ niveau: 'alerte', texte: 'Delai superieur a 1 an. Envisager une demande DALO si la situation le justifie.' })
+  if (dalo && ajuste > 180) signaux.push({ niveau: 'alerte', texte: 'DALO avec delai > 6 mois : possible manquement legal, alerter le directeur.' })
+
+  res.json({
+    disponible: true,
+    profil: { typologie, composition, dalo, score, prioritaire },
+    base_statistique: {
+      niveau: niv1 ? 'typologie + DALO' : niv2 ? 'typologie' : 'global',
+      echantillon: meilleur.echantillon,
+      moyenne: meilleur.delai_moyen_jours,
+      mediane: meilleur.delai_median_jours,
+      min: meilleur.delai_min_jours,
+      max: meilleur.delai_max_jours
+    },
+    estimation_jours: ajuste,
+    estimation_mois: Math.round(ajuste / 30 * 10) / 10,
+    intervalle_confiance: {
+      bas: Math.round(ajuste * 0.7),
+      haut: Math.round(ajuste * 1.4)
+    },
+    concurrents_actuels: enAttente,
+    signaux_faibles: signaux
+  })
+})
+
+app.get('/api/ia/stats-globales', requireAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const parTypo = {}
+  for (const d of demandeurs) {
+    if (d.archive) continue
+    const t = d.typologie || 'inconnu'
+    if (!parTypo[t]) parTypo[t] = { total: 0, attribues: 0, delais: [] }
+    parTypo[t].total++
+    if (d.workflow_etape === 'signature' && d.date_depot && d.workflow_etape_at) {
+      parTypo[t].attribues++
+      const dep = new Date(d.date_depot).getTime()
+      const att = new Date(d.workflow_etape_at).getTime()
+      parTypo[t].delais.push(Math.max(0, (att - dep) / (1000 * 3600 * 24)))
+    }
+  }
+  const out = Object.entries(parTypo).map(([typo, v]) => ({
+    typologie: typo,
+    total: v.total,
+    attribues: v.attribues,
+    taux_attribution: v.total ? Math.round(v.attribues / v.total * 100) : 0,
+    delai_moyen_jours: v.delais.length ? Math.round(v.delais.reduce((s, x) => s + x, 0) / v.delais.length) : null
+  }))
+  res.json({ par_typologie: out })
+})
+
+// ============================================================
+// CATCH-ALL React Router (production)
+// ============================================================
+
+if (existsSync(join(DIST, 'index.html'))) {
   app.get('*', (req, res) => {
-    res.sendFile(join(DIST, 'index.html'))
+    if (!req.path.startsWith('/api')) {
+      res.sendFile(join(DIST, 'index.html'))
+    }
   })
 }
 
-// ─── DÉMARRAGE ────────────────────────────────────────────────────────────────
+// ============================================================
+// DEMARRAGE
+// ============================================================
 
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => {
-  console.log(`\n✅ CAL Smart v2.0 — Serveur démarré`)
-  console.log(`   Port → ${PORT}`)
-  console.log(`   Bot  → @CALSmartSaintDenis_bot\n`)
-
-  // Démarrer le scheduler digest hebdo
-  schedulerDigest()
-  // Vérifier urgences toutes les 24h
-  setInterval(checkUrgences, 24 * 60 * 60 * 1000)
+  console.log('\n╔══════════════════════════════════════════╗')
+  console.log('║  Logivia v3.1 · Ville de Saint-Denis     ║')
+  console.log('╚══════════════════════════════════════════╝')
+  console.log('  Port          : ' + PORT)
+  console.log('  Data          : ' + DATA + (process.env.DATA_DIR ? ' (volume persistant)' : ' (ephemere, dev)'))
+  console.log('  Telegram      : ' + (process.env.BOT_TOKEN ? 'token via env' : 'token fallback code'))
+  console.log('  App URL       : ' + (process.env.APP_URL || '(APP_URL non definie - les liens Telegram utiliseront l\'URL par defaut)'))
+  console.log('  Build prod    : ' + existsSync(join(DIST, 'index.html')))
+  console.log('  Temps reel SSE: actif sur /api/events\n')
 })

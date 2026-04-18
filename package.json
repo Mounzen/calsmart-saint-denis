@@ -2,7 +2,7 @@
   "name": "logivia",
   "version": "3.0.0",
   "type": "module",
-  "description": "Logivia — Gestion intelligente des attributions de logements · Ville de Saint-Denis",
+  "description": "Logivia — Gestion intelligente des attributions de logements · Saint-Denis de la Réunion (974)",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "client": "vite --port 3000",

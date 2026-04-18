@@ -2,51 +2,77 @@
   "elus": [
     {
       "id": "E1",
-      "nom": "M. Dupont",
-      "prenom": "André",
-      "secteur": "Nord",
-      "quartiers": [
-        "Floréal",
-        "La Courneuve"
-      ]
-    },
-    {
-      "id": "E2",
-      "nom": "Mme Leclerc",
-      "prenom": "Sophie",
+      "nom": "HOAREAU",
+      "prenom": "Jean-François",
       "secteur": "Centre",
       "quartiers": [
         "Centre-ville",
-        "Mutualité"
-      ]
+        "Vauban"
+      ],
+      "email": "",
+      "telephone": ""
+    },
+    {
+      "id": "E2",
+      "nom": "PAYET",
+      "prenom": "Marie-Josée",
+      "secteur": "Est",
+      "quartiers": [
+        "Le Chaudron",
+        "Sainte-Clotilde",
+        "Moufia"
+      ],
+      "email": "",
+      "telephone": ""
     },
     {
       "id": "E3",
-      "nom": "M. Traoré",
-      "prenom": "Moussa",
+      "nom": "GRONDIN",
+      "prenom": "Patrick",
       "secteur": "Ouest",
       "quartiers": [
-        "Franc-Moisin",
-        "Allende"
-      ]
+        "Bellepierre",
+        "La Montagne",
+        "Saint-Bernard"
+      ],
+      "email": "",
+      "telephone": ""
     },
     {
       "id": "E4",
-      "nom": "Mme Sow",
-      "prenom": "Kadiatou",
-      "secteur": "Est",
+      "nom": "TECHER",
+      "prenom": "Ghislaine",
+      "secteur": "Hauts",
       "quartiers": [
-        "Cosmonautes"
-      ]
+        "Bois-de-Nèfles",
+        "Le Brûlé",
+        "La Bretagne"
+      ],
+      "email": "",
+      "telephone": ""
     },
     {
       "id": "E5",
-      "nom": "HOAREAU",
-      "prenom": "Jean François",
-      "secteur": "Centre",
+      "nom": "LEBRETON",
+      "prenom": "Daniel",
+      "secteur": "Nord",
       "quartiers": [
-        "La Plaine",
-        "Centre-ville"
+        "Montgaillard",
+        "Domenjod",
+        "Saint-François"
+      ],
+      "email": "",
+      "telephone": ""
+    },
+    {
+      "id": "E6",
+      "nom": "ROBERT",
+      "prenom": "Sylvie",
+      "secteur": "Sud",
+      "quartiers": [
+        "La Providence",
+        "La Source",
+        "Camélias"
       ],
       "email": "",
       "telephone": ""
@@ -61,34 +87,55 @@
     "T6"
   ],
   "secteurs": [
-    "Nord",
-    "Sud",
+    "Centre",
     "Est",
     "Ouest",
-    "Centre"
+    "Nord",
+    "Sud",
+    "Hauts"
   ],
   "quartiers": [
-    "Floréal",
     "Centre-ville",
-    "Franc-Moisin",
-    "La Plaine",
-    "Cosmonautes",
-    "Allende",
-    "Mutualité",
-    "La Courneuve"
+    "Vauban",
+    "Saint-Jacques",
+    "Le Butor",
+    "Le Chaudron",
+    "Sainte-Clotilde",
+    "Moufia",
+    "Commune Prima",
+    "Bas de la Rivière",
+    "Bellepierre",
+    "La Montagne",
+    "Saint-Bernard",
+    "Ruisseau Blanc",
+    "Bois-de-Nèfles",
+    "Le Brûlé",
+    "La Bretagne",
+    "Montgaillard",
+    "Domenjod",
+    "Saint-François",
+    "La Providence",
+    "La Source",
+    "Camélias",
+    "Bois de Nèfles - Saint-Denis"
   ],
   "bailleurs": [
-    "Plaine Commune Habitat",
-    "Habitat 93",
-    "I3F",
-    "Efidis",
-    "Seine-Saint-Denis Habitat"
+    "SIDR",
+    "SHLMR",
+    "SODIAC",
+    "SEMADER",
+    "CBo Territoria",
+    "SODEGIS",
+    "SEDRE",
+    "SEMAC"
   ],
   "contingents": [
     "Ville",
     "Préfecture",
     "Action Logement",
-    "Bailleur"
+    "Bailleur",
+    "Département",
+    "Région"
   ],
   "situations_logement": [
     "locataire social",
@@ -96,7 +143,9 @@
     "hébergé",
     "sans logement",
     "cohabitation",
-    "occupation précaire"
+    "occupation précaire",
+    "logement insalubre",
+    "logement indigne"
   ],
   "motifs_refus": [
     "Inadéquation ressources / loyer",

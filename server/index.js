@@ -454,6 +454,105 @@ app.get('/api/referentiels', requireAuth, (req, res) => {
   res.json(ref)
 })
 
+// ============================================================
+// GESTION REFERENTIELS (secteurs, quartiers, bailleurs, contingents)
+// Accessible uniquement au directeur
+// ============================================================
+
+const REF_LISTS = ['secteurs', 'quartiers', 'bailleurs', 'contingents', 'situations_logement', 'motifs_refus', 'statuts_post_cal', 'typologies']
+
+app.post('/api/referentiels/:list', requireAuth, requireRole('directeur'), (req, res) => {
+  const list = req.params.list
+  if (!REF_LISTS.includes(list)) return res.status(400).json({ error: 'Liste invalide' })
+  const value = (req.body && typeof req.body.value === 'string') ? req.body.value.trim() : ''
+  if (!value) return res.status(400).json({ error: 'Valeur vide' })
+  const ref = readObj('referentiels.json', {})
+  if (!Array.isArray(ref[list])) ref[list] = []
+  if (ref[list].includes(value)) return res.status(409).json({ error: 'Deja present' })
+  ref[list].push(value)
+  writeData('referentiels.json', ref)
+  addLog(req.user, 'REF_ADD', list + ':' + value)
+  res.status(201).json({ ok: true, list, value, items: ref[list] })
+})
+
+app.delete('/api/referentiels/:list/:value', requireAuth, requireRole('directeur'), (req, res) => {
+  const list = req.params.list
+  if (!REF_LISTS.includes(list)) return res.status(400).json({ error: 'Liste invalide' })
+  const value = decodeURIComponent(req.params.value)
+  const ref = readObj('referentiels.json', {})
+  if (!Array.isArray(ref[list])) return res.status(404).json({ error: 'Liste absente' })
+  const before = ref[list].length
+  ref[list] = ref[list].filter(v => v !== value)
+  if (ref[list].length === before) return res.status(404).json({ error: 'Valeur non trouvee' })
+  writeData('referentiels.json', ref)
+  addLog(req.user, 'REF_DEL', list + ':' + value)
+  res.json({ ok: true, list, value, items: ref[list] })
+})
+
+app.put('/api/referentiels/:list/:value', requireAuth, requireRole('directeur'), (req, res) => {
+  const list = req.params.list
+  if (!REF_LISTS.includes(list)) return res.status(400).json({ error: 'Liste invalide' })
+  const oldValue = decodeURIComponent(req.params.value)
+  const newValue = (req.body && typeof req.body.value === 'string') ? req.body.value.trim() : ''
+  if (!newValue) return res.status(400).json({ error: 'Nouvelle valeur vide' })
+  const ref = readObj('referentiels.json', {})
+  if (!Array.isArray(ref[list])) return res.status(404).json({ error: 'Liste absente' })
+  const idx = ref[list].indexOf(oldValue)
+  if (idx === -1) return res.status(404).json({ error: 'Valeur non trouvee' })
+  if (ref[list].includes(newValue) && newValue !== oldValue) return res.status(409).json({ error: 'Nouvelle valeur deja presente' })
+  ref[list][idx] = newValue
+  writeData('referentiels.json', ref)
+  addLog(req.user, 'REF_UPD', list + ':' + oldValue + ' -> ' + newValue)
+  res.json({ ok: true, list, oldValue, newValue, items: ref[list] })
+})
+
+// ============================================================
+// SYNC REFERENTIELS : merge 974 seed dans le volume
+// Sans destruction des elus + valeurs deja saisies par l utilisateur
+// ============================================================
+
+const SEED_974 = {
+  secteurs: ['Centre', 'Est', 'Ouest', 'Nord', 'Sud', 'Hauts'],
+  quartiers: [
+    'Centre-ville', 'Vauban', 'Saint-Jacques', 'Le Butor',
+    'Le Chaudron', 'Sainte-Clotilde', 'Moufia', 'Commune Prima', 'Bas de la Riviere',
+    'Bellepierre', 'La Montagne', 'Saint-Bernard', 'Ruisseau Blanc',
+    'Bois-de-Nefles', 'Le Brule', 'La Bretagne',
+    'Montgaillard', 'Domenjod', 'Saint-Francois',
+    'La Providence', 'La Source', 'Camelias'
+  ],
+  bailleurs: ['SIDR', 'SHLMR', 'SODIAC', 'SEMADER', 'CBo Territoria', 'SODEGIS', 'SEDRE', 'SEMAC'],
+  contingents: ['Ville', 'Prefecture', 'Action Logement', 'Bailleur', 'Departement', 'Region']
+}
+
+app.post('/api/admin/sync-referentiels', requireAuth, requireRole('directeur'), (req, res) => {
+  const mode = (req.body && req.body.mode) || 'merge'
+  const ref = readObj('referentiels.json', {})
+  const before = JSON.stringify(ref)
+
+  if (mode === 'replace') {
+    // Remplace les listes 974 mais garde les elus + historique_biais
+    Object.keys(SEED_974).forEach(k => { ref[k] = [...SEED_974[k]] })
+  } else {
+    // Merge : ajoute les valeurs manquantes sans toucher aux existantes
+    Object.keys(SEED_974).forEach(k => {
+      if (!Array.isArray(ref[k])) ref[k] = []
+      SEED_974[k].forEach(v => {
+        if (!ref[k].includes(v)) ref[k].push(v)
+      })
+    })
+  }
+  // Assure des listes systeme
+  if (!Array.isArray(ref.typologies) || ref.typologies.length === 0) {
+    ref.typologies = ['T1', 'T2', 'T3', 'T4', 'T5', 'T6']
+  }
+
+  const changed = JSON.stringify(ref) !== before
+  if (changed) writeData('referentiels.json', ref)
+  addLog(req.user, 'SYNC_REF_974', mode + (changed ? ' (updated)' : ' (noop)'))
+  res.json({ ok: true, mode, changed, referentiels: ref })
+})
+
 app.get('/api/elus', requireAuth, (req, res) => {
   const ref = readObj('referentiels.json', { elus: [] })
   res.json(ref.elus || [])
@@ -3335,6 +3434,182 @@ app.get('/api/ia/stats-globales', requireAuth, (req, res) => {
 })
 
 // ============================================================
+// EXPORT CSV universel - demandeurs/audiences/decisions/logements/elus
+// ============================================================
+//
+// Format CSV avec separateur ';' (standard Excel FR) + BOM UTF-8
+// pour que les accents s'ouvrent correctement dans Excel sans reglage.
+// Filtres alignes sur les endpoints de liste correspondants.
+
+function csvEscape(v) {
+  if (v === null || v === undefined) return ''
+  let s
+  if (typeof v === 'boolean') s = v ? 'Oui' : 'Non'
+  else if (Array.isArray(v)) s = v.join(', ')
+  else if (typeof v === 'object') s = JSON.stringify(v)
+  else s = String(v)
+  if (/[";\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'
+  return s
+}
+
+function toCsv(rows, columns) {
+  const cols = columns && columns.length
+    ? columns
+    : Object.keys(rows[0] || {}).map(k => ({ key: k, label: k }))
+  const header = cols.map(c => csvEscape(c.label)).join(';')
+  const body = rows.map(r => cols.map(c => {
+    const val = typeof c.get === 'function' ? c.get(r) : r[c.key]
+    return csvEscape(val)
+  }).join(';')).join('\r\n')
+  // BOM UTF-8 pour Excel
+  return '\uFEFF' + header + '\r\n' + body + (body ? '\r\n' : '')
+}
+
+const EXPORT_COLUMNS = {
+  demandeurs: [
+    { key: 'id', label: 'ID' },
+    { key: 'nud', label: 'NUD' },
+    { key: 'nom', label: 'Nom' },
+    { key: 'prenom', label: 'Prenom' },
+    { key: 'statut', label: 'Statut' },
+    { key: 'typ_v', label: 'Typologie voulue' },
+    { key: 'typ_min', label: 'Typologie min' },
+    { key: 'typ_max', label: 'Typologie max' },
+    { key: 'anc', label: 'Anciennete (ans)' },
+    { key: 'adultes', label: 'Adultes' },
+    { key: 'enfants', label: 'Enfants' },
+    { key: 'compo', label: 'Composition' },
+    { key: 'rev', label: 'Revenus' },
+    { key: 'quartier_origine', label: 'Quartier origine' },
+    { key: 'quartiers', label: 'Quartiers souhaites' },
+    { key: 'secteurs', label: 'Secteurs' },
+    { key: 'dalo', label: 'DALO' },
+    { key: 'violences', label: 'Violences' },
+    { key: 'sans_log', label: 'Sans logement' },
+    { key: 'handicap', label: 'Handicap' },
+    { key: 'expulsion', label: 'Expulsion' },
+    { key: 'mutation', label: 'Mutation' },
+    { key: 'grossesse', label: 'Grossesse' },
+    { key: 'suroc', label: 'Suroccupation' },
+    { key: 'pieces', label: 'Pieces completes' },
+    { key: 'workflow_etape', label: 'Etape workflow' },
+    { key: 'date_depot', label: 'Date depot' }
+  ],
+  audiences: [
+    { key: 'id', label: 'ID' },
+    { key: 'date_audience', label: 'Date audience' },
+    { key: 'dem_id', label: 'ID demandeur' },
+    { key: 'elu_id', label: 'ID elu' },
+    { key: 'objet', label: 'Objet' },
+    { key: 'quartier_origine', label: 'Quartier origine' },
+    { key: 'quartier_elu', label: 'Quartier elu' },
+    { key: 'quartier_souhaite', label: 'Quartier souhaite' },
+    { key: 'quartier_attribue', label: 'Quartier attribue' },
+    { key: 'favorable', label: 'Favorable' },
+    { key: 'statut', label: 'Statut' },
+    { key: 'notes', label: 'Notes' }
+  ],
+  decisions: [
+    { key: 'id_cal', label: 'ID CAL' },
+    { key: 'date_cal', label: 'Date CAL' },
+    { key: 'logement_ref', label: 'Ref logement' },
+    { key: 'logement_adresse', label: 'Adresse' },
+    { key: 'dem_id', label: 'ID demandeur' },
+    { key: 'dem_nom', label: 'Nom demandeur' },
+    { key: 'decision', label: 'Decision' },
+    { key: 'agent_nom', label: 'Agent' }
+  ],
+  logements: [
+    { key: 'id', label: 'ID' },
+    { key: 'ref', label: 'Reference' },
+    { key: 'adresse', label: 'Adresse' },
+    { key: 'quartier', label: 'Quartier' },
+    { key: 'typ', label: 'Typologie' },
+    { key: 'surf', label: 'Surface' },
+    { key: 'loyer', label: 'Loyer' },
+    { key: 'charges', label: 'Charges' },
+    { key: 'etage', label: 'Etage' },
+    { key: 'ascenseur', label: 'Ascenseur' },
+    { key: 'bailleur', label: 'Bailleur' },
+    { key: 'statut', label: 'Statut' },
+    { key: 'date_dispo', label: 'Date disponibilite' }
+  ],
+  elus: [
+    { key: 'id', label: 'ID' },
+    { key: 'nom', label: 'Nom' },
+    { key: 'prenom', label: 'Prenom' },
+    { key: 'secteur', label: 'Secteur' },
+    { key: 'quartiers', label: 'Quartiers' },
+    { key: 'telephone', label: 'Telephone' },
+    { key: 'email', label: 'Email' },
+    { key: 'actif', label: 'Actif' }
+  ]
+}
+
+app.get('/api/export/:entity', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+  const entity = req.params.entity
+  let rows = []
+
+  try {
+    if (entity === 'demandeurs') {
+      rows = readData('demandeurs.json')
+      const { statut, quartier, dalo, search } = req.query
+      if (statut) rows = rows.filter(x => x.statut === statut)
+      else rows = rows.filter(x => !x.statut || x.statut !== 'archive')
+      if (quartier) rows = rows.filter(x => (x.quartiers || []).includes(quartier))
+      if (dalo === 'true') rows = rows.filter(x => !!x.dalo)
+      if (search) {
+        const q = search.toLowerCase()
+        rows = rows.filter(x => (x.nom + ' ' + x.prenom + ' ' + (x.nud || '')).toLowerCase().includes(q))
+      }
+    } else if (entity === 'audiences') {
+      rows = readData('audiences.json')
+      const { elu_id, dem_id, statut } = req.query
+      if (elu_id) rows = rows.filter(x => x.elu_id === elu_id)
+      if (dem_id) rows = rows.filter(x => x.dem_id === dem_id)
+      if (statut) rows = rows.filter(x => x.statut === statut)
+      // Restriction elu : que ses audiences
+      if (req.user.role === 'elu' && req.user.elu_id) {
+        rows = rows.filter(x => x.elu_id === req.user.elu_id)
+      }
+    } else if (entity === 'decisions' || entity === 'decisions-cal') {
+      const decs = readData('decisions_cal.json')
+      // Une ligne par candidat de chaque decision
+      rows = decs.flatMap(d => (d.candidats || []).map(c => ({
+        id_cal: d.id,
+        date_cal: d.date_cal,
+        logement_ref: d.logement_ref,
+        logement_adresse: d.logement_adresse,
+        dem_id: c.dem_id,
+        dem_nom: c.nom || '',
+        decision: c.decision || '',
+        agent_nom: d.agent_nom || ''
+      })))
+    } else if (entity === 'logements') {
+      rows = readData('logements.json')
+    } else if (entity === 'elus') {
+      const ref = readObj('referentiels.json', { elus: [] })
+      rows = (ref.elus || []).filter(e => e.actif !== false)
+    } else {
+      return res.status(400).json({ error: 'Entite inconnue : ' + entity })
+    }
+  } catch (e) {
+    return res.status(500).json({ error: 'Lecture donnees impossible : ' + e.message })
+  }
+
+  const cols = EXPORT_COLUMNS[entity] || Object.keys(rows[0] || {}).map(k => ({ key: k, label: k }))
+  const csv = toCsv(rows, cols)
+  const today = new Date().toISOString().split('T')[0]
+  const filename = 'logivia_' + entity + '_' + today + '.csv'
+
+  addLog(req.user, 'EXPORT_' + entity.toUpperCase(), rows.length + ' lignes')
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"')
+  res.send(csv)
+})
+
+// ============================================================
 // CATCH-ALL React Router (production)
 // ============================================================
 
@@ -3361,4 +3636,4 @@ app.listen(PORT, () => {
   console.log('  App URL       : ' + (process.env.APP_URL || '(APP_URL non definie - les liens Telegram utiliseront l\'URL par defaut)'))
   console.log('  Build prod    : ' + existsSync(join(DIST, 'index.html')))
   console.log('  Temps reel SSE: actif sur /api/events\n')
-})
+})

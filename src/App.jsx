@@ -284,6 +284,69 @@ function Spin() {
 }
 
 // ===========================================================
+// EXPORT BUTTON (CSV)
+// ===========================================================
+// Usage : <ExportButton entity="demandeurs" filters={{ statut, search }} label="Exporter" />
+// Passe le token d'auth et telecharge le fichier directement.
+
+function ExportButton({ entity, filters, label = 'Exporter CSV', compact = false }) {
+  const [busy, setBusy] = useState(false)
+  const handleClick = async () => {
+    setBusy(true)
+    try {
+      const params = new URLSearchParams()
+      Object.entries(filters || {}).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '' && v !== false) {
+          params.set(k, typeof v === 'boolean' ? 'true' : String(v))
+        }
+      })
+      const token = localStorage.getItem('cal_token')
+      const qs = params.toString()
+      const url = '/api/export/' + entity + (qs ? '?' + qs : '')
+      const r = await fetch(url, { headers: token ? { 'x-auth-token': token } : {} })
+      if (!r.ok) throw new Error('Export refuse (' + r.status + ')')
+      const blob = await r.blob()
+      const today = new Date().toISOString().split('T')[0]
+      const filename = 'logivia_' + entity + '_' + today + '.csv'
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000)
+    } catch (e) {
+      alert('Erreur export : ' + e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <button
+      onClick={handleClick}
+      disabled={busy}
+      title="Exporter la liste filtree au format CSV"
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6,
+        padding: compact ? '5px 10px' : '7px 14px',
+        borderRadius: 7, cursor: busy ? 'wait' : 'pointer',
+        background: busy ? C.border : '#fff',
+        color: C.text, border: '1px solid ' + C.border,
+        fontFamily: Fh, fontWeight: 700, fontSize: compact ? 11 : 12,
+        opacity: busy ? 0.6 : 1
+      }}
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="7 10 12 15 17 10" />
+        <line x1="12" y1="15" x2="12" y2="3" />
+      </svg>
+      {busy ? 'Export...' : label}
+    </button>
+  )
+}
+
+// ===========================================================
 // SPLASH SCREEN (animation d'entrée)
 // ===========================================================
 
@@ -547,6 +610,7 @@ function Sidebar({ active, setActive, badge, onLogout, onChangePwd, onDemo, isDe
     { id: 'notifications', ico: 'notifications', label: 'Notifications', badge, roles: ['agent', 'directeur', 'elu'] },
     { id: 'portail', ico: 'portail', label: 'Portail Candidat', roles: ['directeur', 'agent'] },
     { id: 'users', ico: 'users', label: 'Utilisateurs', roles: ['directeur'] },
+    { id: 'referentiels', ico: 'logements', label: 'Référentiels 974', roles: ['directeur'] },
     { id: 'telegram', ico: 'telegram', label: 'Telegram', roles: ['directeur', 'agent'] },
     { id: 'logs', ico: 'logs', label: 'Journal', roles: ['directeur', 'agent'] }
   ].filter(n => !user || n.roles.includes(user.role))
@@ -561,7 +625,7 @@ function Sidebar({ active, setActive, badge, onLogout, onChangePwd, onDemo, isDe
           <div style={{ width: 34, height: 34, background: isDemo ? C.amber : 'linear-gradient(135deg, #E05C2A 0%, #F68144 100%)', borderRadius: 9, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 900, color: '#fff', fontFamily: Fh, boxShadow: isDemo ? 'none' : '0 4px 12px rgba(224,92,42,0.25)' }}>L</div>
           <div>
             <div style={{ color: '#fff', fontWeight: 800, fontSize: 14, fontFamily: Fh, letterSpacing: '-0.03em' }}>Logivia</div>
-            <div style={{ color: isDemo ? C.amber : C.light, fontSize: 10, fontWeight: isDemo ? 700 : 400 }}>{isDemo ? 'MODE DÉMO' : 'Saint-Denis'}</div>
+            <div style={{ color: isDemo ? C.amber : C.light, fontSize: 10, fontWeight: isDemo ? 700 : 400 }}>{isDemo ? 'MODE DÉMO' : 'Saint-Denis 974'}</div>
           </div>
         </div>
       </div>
@@ -692,7 +756,7 @@ function Logements({ goMatch }) {
   const [archiveMotif, setArchiveMotif] = useState('')
   const [archiveLibre, setArchiveLibre] = useState('')
   const [saving, setSaving] = useState(false)
-  const blank = { ref: '', bailleur: '', adresse: '', quartier: '', secteur: '', typ: 'T3', surface: '', etage: '0', asc: false, rdc: false, pmr: false, loyer_hc: '', charges: '', plafond: 'PLUS', dispo: '', contingent: 'Ville' }
+  const blank = { ref: '', bailleur: '', operation: '', neuf: false, annee_construction: '', adresse: '', quartier: '', secteur: '', typ: 'T3', surface: '', etage: '0', asc: false, rdc: false, pmr: false, loyer_hc: '', charges: '', plafond: 'PLUS', dispo: '', contingent: 'Ville' }
   const [form, setForm] = useState(blank)
   const set = k => e => setForm(p => ({ ...p, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value }))
 
@@ -730,10 +794,7 @@ function Logements({ goMatch }) {
           <p style={{ color: C.muted, fontSize: 12.5 }}>{(logements || []).length} logements vacants</p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button onClick={() => window.open('/api/export/logements', '_blank')}
-            style={{ padding: '9px 16px', border: '1px solid ' + C.border, borderRadius: 9, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 600, color: C.muted }}>
-            Export CSV
-          </button>
+          <ExportButton entity="logements" />
           <button onClick={() => setShowForm(true)}
             style={{ padding: '10px 18px', background: C.accent, color: '#fff', border: 'none', borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>
             + Nouveau logement
@@ -745,10 +806,14 @@ function Logements({ goMatch }) {
           <div style={{ width: 46, height: 46, background: C.accentL, borderRadius: 9, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontFamily: Fh, fontWeight: 800, color: C.accent, flexShrink: 0 }}>{l.typ}</div>
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 700, fontSize: 13.5, color: C.text, fontFamily: Fh }}>{l.adresse}</div>
-            <div style={{ fontSize: 12, color: C.muted, marginTop: 1 }}>{l.quartier} - {l.bailleur} - {l.surface} m2</div>
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 1 }}>
+              {l.operation ? <span style={{ fontWeight: 600, color: C.text }}>{l.operation} - </span> : null}
+              {l.quartier} - {l.bailleur} - {l.surface} m2
+            </div>
             <div style={{ marginTop: 5 }}>
               <Tag text={l.contingent} color={C.accent} bg={C.accentL} />
               <Tag text={l.plafond} />
+              {l.neuf && <Tag text="Neuf" color={C.green} bg={C.greenBg} />}
               {l.pmr && <Tag text="PMR" color={C.green} bg={C.greenBg} />}
               {l.rdc && <Tag text="RDC" color={C.blue} bg={C.blueBg} />}
               {l.asc && <Tag text="Ascenseur" />}
@@ -781,6 +846,8 @@ function Logements({ goMatch }) {
                 {(ref && ref.bailleurs ? ref.bailleurs : []).map(b => <option key={b}>{b}</option>)}
               </select>
             </Field>
+            <Field label="Nom de l'opération"><input style={inp} value={form.operation} onChange={set('operation')} placeholder="Ex: Résidence Les Flamboyants" /></Field>
+            <Field label="Année de construction"><input style={inp} type="number" value={form.annee_construction} onChange={set('annee_construction')} placeholder="Ex: 2024" /></Field>
             <Field label="Adresse *"><input style={inp} value={form.adresse} onChange={set('adresse')} /></Field>
             <Field label="Quartier">
               <select style={inp} value={form.quartier} onChange={set('quartier')}>
@@ -814,8 +881,8 @@ function Logements({ goMatch }) {
             </Field>
             <Field label="Date disponibilite"><input style={inp} value={form.dispo} placeholder="JJ/MM/AAAA" onChange={set('dispo')} /></Field>
           </div>
-          <div style={{ display: 'flex', gap: 16, marginTop: 10 }}>
-            {[['asc', 'Ascenseur'], ['rdc', 'RDC'], ['pmr', 'PMR']].map(([k, l]) => (
+          <div style={{ display: 'flex', gap: 16, marginTop: 10, flexWrap: 'wrap' }}>
+            {[['neuf', 'Logement neuf'], ['asc', 'Ascenseur'], ['rdc', 'RDC'], ['pmr', 'PMR']].map(([k, l]) => (
               <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: form[k] ? C.accent : C.text }}>
                 <input type="checkbox" checked={!!form[k]} onChange={set(k)} /> {l}
               </label>
@@ -839,6 +906,9 @@ function Logements({ goMatch }) {
           fields={[
             { key: 'ref', label: 'Reference', type: 'text' },
             { key: 'bailleur', label: 'Bailleur', type: 'select', options: (ref && ref.bailleurs ? ref.bailleurs : []) },
+            { key: 'operation', label: "Nom de l'operation", type: 'text' },
+            { key: 'annee_construction', label: 'Annee de construction', type: 'number' },
+            { key: 'neuf', label: 'Logement neuf', type: 'boolean', checkboxLabel: 'Logement neuf' },
             { key: 'adresse', label: 'Adresse', type: 'text', full: true },
             { key: 'quartier', label: 'Quartier', type: 'select', options: (ref && ref.quartiers ? ref.quartiers : []) },
             { key: 'secteur', label: 'Secteur', type: 'select', options: (ref && ref.secteurs ? ref.secteurs : []) },
@@ -1016,11 +1086,8 @@ function Demandeurs() {
           })}
           {filtered.length === 0 && <div style={{ textAlign: 'center', color: C.muted, fontSize: 12, padding: 20 }}>Aucun resultat</div>}
         </div>
-        <div style={{ padding: 10, borderTop: '1px solid ' + C.border }}>
-          <button onClick={() => window.open('/api/export/demandeurs', '_blank')}
-            style={{ width: '100%', padding: '7px', border: '1px solid ' + C.border, borderRadius: 7, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 11, fontWeight: 600, color: C.muted }}>
-            Export CSV ({filtered.length})
-          </button>
+        <div style={{ padding: 10, borderTop: '1px solid ' + C.border, display: 'flex', justifyContent: 'center' }}>
+          <ExportButton entity="demandeurs" filters={{ search }} label={'Export CSV (' + filtered.length + ')'} />
         </div>
       </div>
 
@@ -1616,10 +1683,7 @@ function AudiencesElus() {
           <p style={{ color: C.muted, fontSize: 12.5 }}>{(audiences || []).length} audiences - {attribues.length} attributions</p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button onClick={() => window.open('/api/export/audiences', '_blank')}
-            style={{ padding: '9px 16px', border: '1px solid ' + C.border, borderRadius: 9, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 600, color: C.muted }}>
-            Export CSV
-          </button>
+          <ExportButton entity="audiences" />
           <button onClick={() => setShowForm(true)}
             style={{ padding: '10px 18px', background: C.purple, color: '#fff', border: 'none', borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>
             + Nouvelle audience
@@ -1888,9 +1952,12 @@ function GestionElus() {
           <h1 style={{ fontFamily: Fh, fontSize: 22, fontWeight: 800, color: C.text, margin: '0 0 4px', letterSpacing: '-0.03em' }}>Gestion des Elus</h1>
           <p style={{ color: C.muted, fontSize: 12.5 }}>{actifs.length} elu(s) references - Saint-Denis</p>
         </div>
-        <button onClick={openNew} style={{ padding: '10px 18px', background: C.purple, color: '#fff', border: 'none', borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>
-          + Nouvel elu
-        </button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <ExportButton entity="elus" />
+          <button onClick={openNew} style={{ padding: '10px 18px', background: C.purple, color: '#fff', border: 'none', borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>
+            + Nouvel elu
+          </button>
+        </div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(290px,1fr))', gap: 14 }}>
         {actifs.map(elu => {
@@ -2358,6 +2425,162 @@ function PortailInfo() {
 }
 
 // ===========================================================
+// REFERENTIELS PAGE (directeur only)
+// Gestion quartiers / secteurs / bailleurs / contingents
+// ===========================================================
+
+function ReferentielsPage() {
+  const { data: ref, loading, reload } = useApi('/referentiels')
+  const toast = useToast()
+  const [syncing, setSyncing] = useState(false)
+  const [active, setActive] = useState('quartiers')
+
+  const LISTS = [
+    { key: 'quartiers', label: 'Quartiers' },
+    { key: 'secteurs', label: 'Secteurs' },
+    { key: 'bailleurs', label: 'Bailleurs' },
+    { key: 'contingents', label: 'Contingents' },
+    { key: 'situations_logement', label: 'Situations logement' },
+    { key: 'motifs_refus', label: 'Motifs de refus' },
+    { key: 'statuts_post_cal', label: 'Statuts post-CAL' }
+  ]
+
+  const sync = async (mode) => {
+    if (mode === 'replace' && !window.confirm('Remplacer par le seed 974 ? Les valeurs personnalisees seront supprimees (les elus et l historique sont conserves).')) return
+    setSyncing(true)
+    try {
+      const r = await api('/admin/sync-referentiels', { method: 'POST', body: { mode } })
+      toast(r.changed ? 'Referentiels 974 ' + (mode === 'replace' ? 'remplaces' : 'fusionnes') : 'Deja a jour', r.changed ? 'success' : 'info')
+      reload()
+    } catch (e) { toast('Erreur sync : ' + e.message, 'error') }
+    finally { setSyncing(false) }
+  }
+
+  if (loading) return <Spin />
+
+  return (
+    <div style={{ padding: 28, fontFamily: Fb }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+        <div>
+          <h1 style={{ fontFamily: Fh, fontSize: 22, fontWeight: 800, color: C.text, margin: '0 0 4px', letterSpacing: '-0.03em' }}>Referentiels Saint-Denis 974</h1>
+          <p style={{ color: C.muted, fontSize: 12.5 }}>Quartiers, secteurs, bailleurs reunionnais</p>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => sync('merge')} disabled={syncing}
+            style={{ padding: '10px 16px', background: C.blue, color: '#fff', border: 'none', borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>
+            {syncing ? '...' : 'Fusionner seed 974'}
+          </button>
+          <button onClick={() => sync('replace')} disabled={syncing}
+            style={{ padding: '10px 16px', background: C.red, color: '#fff', border: 'none', borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>
+            Remplacer par seed 974
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+        {LISTS.map(l => (
+          <button key={l.key} onClick={() => setActive(l.key)}
+            style={{ padding: '7px 14px', border: '1px solid ' + C.border, borderRadius: 8, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700, background: active === l.key ? C.accent : C.card, color: active === l.key ? '#fff' : C.text }}>
+            {l.label} ({ref && ref[l.key] ? ref[l.key].length : 0})
+          </button>
+        ))}
+      </div>
+
+      <RefListEditor
+        list={active}
+        items={(ref && ref[active]) || []}
+        onChanged={reload}
+        toast={toast}
+      />
+    </div>
+  )
+}
+
+function RefListEditor({ list, items, onChanged, toast }) {
+  const [newValue, setNewValue] = useState('')
+  const [editing, setEditing] = useState(null) // {old, nv}
+  const [busy, setBusy] = useState(false)
+
+  const add = async () => {
+    const v = newValue.trim()
+    if (!v) return
+    setBusy(true)
+    try {
+      await api('/referentiels/' + list, { method: 'POST', body: { value: v } })
+      toast('Ajoute : ' + v, 'success')
+      setNewValue('')
+      onChanged()
+    } catch (e) { toast('Erreur : ' + e.message, 'error') }
+    finally { setBusy(false) }
+  }
+
+  const del = async (v) => {
+    if (!window.confirm('Supprimer "' + v + '" ?')) return
+    try {
+      await api('/referentiels/' + list + '/' + encodeURIComponent(v), { method: 'DELETE' })
+      toast('Supprime : ' + v, 'warning')
+      onChanged()
+    } catch (e) { toast('Erreur : ' + e.message, 'error') }
+  }
+
+  const saveEdit = async () => {
+    if (!editing) return
+    const nv = editing.nv.trim()
+    if (!nv || nv === editing.old) { setEditing(null); return }
+    try {
+      await api('/referentiels/' + list + '/' + encodeURIComponent(editing.old), { method: 'PUT', body: { value: nv } })
+      toast('Renomme : ' + editing.old + ' -> ' + nv, 'success')
+      setEditing(null)
+      onChanged()
+    } catch (e) { toast('Erreur : ' + e.message, 'error') }
+  }
+
+  return (
+    <div style={{ background: C.card, border: '1px solid ' + C.border, borderRadius: 12, padding: 20 }}>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+        <input
+          style={{ ...inp, flex: 1 }}
+          value={newValue}
+          onChange={e => setNewValue(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') add() }}
+          placeholder={'Nouvelle valeur (' + list + ')'}
+        />
+        <button onClick={add} disabled={busy || !newValue.trim()}
+          style={{ padding: '9px 18px', background: C.accent, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>
+          + Ajouter
+        </button>
+      </div>
+      {items.length === 0 && <div style={{ color: C.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>Aucune valeur.</div>}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 8 }}>
+        {items.map(v => (
+          <div key={v} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: C.bg, borderRadius: 8, border: '1px solid ' + C.border }}>
+            {editing && editing.old === v ? (
+              <>
+                <input
+                  style={{ ...inp, flex: 1, padding: '4px 8px', fontSize: 12 }}
+                  value={editing.nv}
+                  onChange={e => setEditing({ ...editing, nv: e.target.value })}
+                  onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') setEditing(null) }}
+                  autoFocus
+                />
+                <button onClick={saveEdit} style={{ padding: '4px 8px', background: C.green, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>OK</button>
+                <button onClick={() => setEditing(null)} style={{ padding: '4px 8px', background: 'transparent', color: C.muted, border: '1px solid ' + C.border, borderRadius: 6, cursor: 'pointer', fontSize: 11 }}>x</button>
+              </>
+            ) : (
+              <>
+                <span style={{ flex: 1, fontSize: 13, color: C.text }}>{v}</span>
+                <button onClick={() => setEditing({ old: v, nv: v })} style={{ padding: '3px 8px', background: 'transparent', color: C.blue, border: '1px solid ' + C.blue + '44', borderRadius: 6, cursor: 'pointer', fontSize: 10.5, fontWeight: 700, fontFamily: Fh }}>Edit</button>
+                <button onClick={() => del(v)} style={{ padding: '3px 8px', background: 'transparent', color: C.red, border: '1px solid ' + C.red + '44', borderRadius: 6, cursor: 'pointer', fontSize: 10.5, fontWeight: 700, fontFamily: Fh }}>Supprimer</button>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ===========================================================
 // APP INNER
 // ===========================================================
 
@@ -2434,6 +2657,7 @@ function AppInner() {
             }} />
           </div>}
           {active === 'users' && <div style={{ flex: 1, overflowY: 'auto' }}><GestionUtilisateurs /></div>}
+          {active === 'referentiels' && <div style={{ flex: 1, overflowY: 'auto' }}><ReferentielsPage /></div>}
           {active === 'telegram' && <div style={{ flex: 1, overflowY: 'auto' }}><TelegramPanel /></div>}
           {active === 'logs' && <div style={{ flex: 1, overflowY: 'auto' }}><LogsActions /></div>}
           {active === 'alertes' && <div style={{ flex: 1, overflowY: 'auto' }}><AlertesPage /></div>}

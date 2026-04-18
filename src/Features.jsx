@@ -784,6 +784,208 @@ export function CartePage() {
 // FICHE ELU ENRICHIE (audiences + migration + parcours candidats)
 // ===========================================================
 
+// ============================================================
+// TELEGRAM CONNECT - QR + lien + statut pour elu
+// ============================================================
+
+function TelegramConnect({ elu_id, elu_nom }) {
+  const [statut, setStatut] = useState(null)
+  const [lienData, setLienData] = useState(null)
+  const [showModal, setShowModal] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState(null)
+  const pollRef = useRef(null)
+
+  const loadStatut = useCallback(() => {
+    fapi('/telegram/statut/elu/' + elu_id).then(setStatut).catch(() => {})
+  }, [elu_id])
+
+  useEffect(() => { loadStatut() }, [loadStatut])
+
+  useEffect(() => {
+    if (!showModal) { if (pollRef.current) clearInterval(pollRef.current); return }
+    pollRef.current = setInterval(loadStatut, 3000)
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [showModal, loadStatut])
+
+  const openModal = async () => {
+    setShowModal(true)
+    if (!lienData) {
+      try {
+        const d = await fapi('/telegram/lien-elu/' + elu_id)
+        setLienData(d)
+      } catch (e) {
+        setLienData({ error: e.message })
+      }
+    }
+  }
+
+  const copyLien = () => {
+    if (!lienData || !lienData.lien) return
+    navigator.clipboard.writeText(lienData.lien).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1800)
+    })
+  }
+
+  const sendTest = async () => {
+    setTesting(true); setTestResult(null)
+    try {
+      const r = await fapi('/telegram/test/' + elu_id, { method: 'POST' })
+      setTestResult(r && r.ok ? 'ok' : 'fail')
+    } catch (e) {
+      setTestResult('fail')
+    } finally {
+      setTesting(false)
+      setTimeout(() => setTestResult(null), 3500)
+    }
+  }
+
+  const connecte = statut && statut.connecte
+
+  return (
+    <>
+      <button
+        onClick={openModal}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 8,
+          padding: '8px 14px', borderRadius: 8, cursor: 'pointer',
+          fontFamily: Fh, fontSize: 12, fontWeight: 700,
+          background: connecte ? C.greenBg : C.blueBg,
+          color: connecte ? C.green : C.blue,
+          border: '1px solid ' + (connecte ? C.green : C.blue)
+        }}
+        title={connecte ? 'Telegram active - cliquer pour voir le QR ou retester' : 'Activer les notifications Telegram'}
+      >
+        <span style={{ fontSize: 14 }}>{connecte ? 'OK' : 'TG'}</span>
+        Telegram {connecte ? 'actif' : 'a activer'}
+      </button>
+
+      {showModal && (
+        <div
+          onClick={() => setShowModal(false)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 2000, padding: 20
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: '#fff', borderRadius: 14, padding: 24,
+              maxWidth: 440, width: '100%', boxShadow: '0 25px 60px rgba(0,0,0,0.25)',
+              fontFamily: Fb
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+              <div>
+                <div style={{ fontFamily: Fh, fontWeight: 800, fontSize: 18, color: C.text, letterSpacing: '-0.02em' }}>
+                  Notifications Telegram
+                </div>
+                <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{elu_nom}</div>
+              </div>
+              <button
+                onClick={() => setShowModal(false)}
+                style={{ background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: C.muted, lineHeight: 1 }}
+              >X</button>
+            </div>
+
+            <div style={{
+              padding: '10px 14px', borderRadius: 9, marginBottom: 16,
+              background: connecte ? C.greenBg : C.amberBg,
+              color: connecte ? C.green : C.amber,
+              fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8
+            }}>
+              <span style={{ fontSize: 16 }}>{connecte ? 'OK' : '...'}</span>
+              {connecte
+                ? 'Connecte - chat_id ' + statut.chat_id
+                : 'En attente de connexion - scannez le QR ou envoyez le lien'}
+            </div>
+
+            {!lienData && (
+              <div style={{ textAlign: 'center', padding: 30, color: C.muted, fontSize: 13 }}>
+                Chargement du lien...
+              </div>
+            )}
+
+            {lienData && lienData.error && (
+              <div style={{ padding: 14, background: C.redBg, color: C.red, borderRadius: 8, fontSize: 13 }}>
+                Erreur : {lienData.error}
+              </div>
+            )}
+
+            {lienData && lienData.qr && (
+              <>
+                <div style={{ textAlign: 'center', marginBottom: 16 }}>
+                  <img
+                    src={lienData.qr}
+                    alt="QR code Telegram"
+                    style={{ width: 180, height: 180, borderRadius: 10, border: '1px solid ' + C.border, background: '#fff' }}
+                  />
+                  <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
+                    Scanner avec l'appareil photo du telephone
+                  </div>
+                </div>
+
+                <div style={{ background: C.bg, borderRadius: 8, padding: '10px 12px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 11, color: C.text, flex: 1, wordBreak: 'break-all', fontFamily: 'monospace' }}>
+                    {lienData.lien}
+                  </span>
+                  <button
+                    onClick={copyLien}
+                    style={{
+                      padding: '5px 10px', borderRadius: 6, border: '1px solid ' + C.border,
+                      background: copied ? C.green : '#fff', color: copied ? '#fff' : C.text,
+                      fontFamily: Fh, fontWeight: 700, fontSize: 11, cursor: 'pointer', flexShrink: 0
+                    }}
+                  >
+                    {copied ? 'copie' : 'Copier'}
+                  </button>
+                </div>
+
+                <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.55, marginBottom: 14 }}>
+                  <b style={{ color: C.text }}>Comment ca marche :</b><br/>
+                  1. L'elu scanne le QR (ou clique le lien envoye par SMS).<br/>
+                  2. Telegram s'ouvre. Il appuie sur <b>Start</b>.<br/>
+                  3. Le statut passe automatiquement en <b>Connecte</b> sur cette page.
+                </div>
+
+                {connecte && (
+                  <button
+                    onClick={sendTest}
+                    disabled={testing}
+                    style={{
+                      width: '100%', padding: '10px 14px', borderRadius: 8,
+                      border: 'none', background: C.navy, color: '#fff',
+                      fontFamily: Fh, fontWeight: 700, fontSize: 13,
+                      cursor: testing ? 'wait' : 'pointer', opacity: testing ? 0.7 : 1
+                    }}
+                  >
+                    {testing ? 'Envoi en cours...' : 'Envoyer un message de test'}
+                  </button>
+                )}
+
+                {testResult === 'ok' && (
+                  <div style={{ marginTop: 10, padding: 8, background: C.greenBg, color: C.green, borderRadius: 6, fontSize: 12, textAlign: 'center', fontWeight: 700 }}>
+                    Message envoye - verifiez le telephone
+                  </div>
+                )}
+                {testResult === 'fail' && (
+                  <div style={{ marginTop: 10, padding: 8, background: C.redBg, color: C.red, borderRadius: 6, fontSize: 12, textAlign: 'center', fontWeight: 700 }}>
+                    Echec de l'envoi
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 export function FicheEluPage({ elu_id, onBack }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -826,6 +1028,10 @@ export function FicheEluPage({ elu_id, onBack }) {
           <div style={{ fontSize: 28, fontWeight: 800, fontFamily: Fh }}>{data.stats.nb_audiences}</div>
           <div style={{ fontSize: 11, opacity: 0.8 }}>audiences</div>
         </div>
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <TelegramConnect elu_id={e.id} elu_nom={(e.prenom || '') + ' ' + e.nom} />
       </div>
 
       <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>

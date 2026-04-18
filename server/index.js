@@ -8,7 +8,7 @@ import cors from 'cors'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, readdirSync, copyFileSync, statSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import { randomBytes } from 'crypto'
+import { randomBytes, createHash } from 'crypto'
 import { spawn } from 'child_process'
 import {
   sendMessage as tgSend,
@@ -1818,6 +1818,340 @@ app.get('/api/rapport-mensuel', requireAuth, (req, res) => {
 })
 
 // ============================================================
+// RAPPORTS MENSUELS - archivage + envoi Telegram
+// ============================================================
+
+/**
+ * Genere un rapport pour un mois donne ("YYYY-MM") a partir des decisions,
+ * audiences et demandeurs de ce mois-la. Si le rapport existe deja dans
+ * /data/rapports/<mois>.json, il est renvoye tel quel (archive immuable).
+ */
+function parseMois(s) {
+  // Format attendu : "2026-04". Par defaut : mois precedent.
+  if (!s || !/^\d{4}-\d{2}$/.test(s)) {
+    const d = new Date()
+    d.setDate(1); d.setMonth(d.getMonth() - 1)
+    return d.toISOString().substring(0, 7)
+  }
+  return s
+}
+
+function getRapportsDir() {
+  const dir = join(DATA, 'rapports')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function estDansMois(dateStr, mois) {
+  if (!dateStr) return false
+  // Accepte "JJ/MM/AAAA" ou ISO
+  let d
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateStr)) {
+    const [jj, mm, aaaa] = dateStr.split('/')
+    d = new Date(aaaa + '-' + mm + '-' + jj)
+  } else {
+    d = new Date(dateStr)
+  }
+  if (isNaN(d.getTime())) return false
+  const ym = d.toISOString().substring(0, 7)
+  return ym === mois
+}
+
+function genererRapportMensuel(mois) {
+  const demandeurs = readData('demandeurs.json')
+  const logements = readData('logements.json')
+  const audiences = readData('audiences.json')
+  const decisions = readData('decisions_cal.json')
+  const courriers = readData('courriers.json')
+
+  const audMois = audiences.filter(a => estDansMois(a.date_audience, mois))
+  const decMois = decisions.filter(d => estDansMois(d.date_cal || d.date, mois))
+  const attribuesMois = audMois.filter(a => a.statut === 'Attribue')
+  const nvxDemandeurs = demandeurs.filter(d => estDansMois(d.date_depot || d.created_at, mois))
+
+  // Repartition par quartier attribue
+  const parQuartierAttr = {}
+  attribuesMois.forEach(a => {
+    const q = a.quartier_attribue || '-'
+    parQuartierAttr[q] = (parQuartierAttr[q] || 0) + 1
+  })
+
+  // Repartition par bailleur
+  const parBailleur = {}
+  decMois.forEach(d => {
+    const l = logements.find(x => x.id === d.logement_id)
+    if (l) parBailleur[l.bailleur] = (parBailleur[l.bailleur] || 0) + 1
+  })
+
+  // Taux effort moyen des attributions
+  const tauxEfforts = []
+  attribuesMois.forEach(a => {
+    const d = demandeurs.find(x => x.id === a.dem_id)
+    const l = logements.find(x => x.id === a.logement_id)
+    if (d && l && d.rev > 0) tauxEfforts.push((l.loyer / d.rev) * 100)
+  })
+  const teMoyen = tauxEfforts.length ? (tauxEfforts.reduce((a, b) => a + b, 0) / tauxEfforts.length).toFixed(1) : null
+
+  // DALO
+  const daloAttribues = attribuesMois.filter(a => {
+    const d = demandeurs.find(x => x.id === a.dem_id)
+    return d && d.dalo
+  }).length
+
+  // Courriers envoyes
+  const courriersMois = courriers.filter(c => estDansMois(c.date, mois))
+  const courriersParType = {}
+  courriersMois.forEach(c => { courriersParType[c.type] = (courriersParType[c.type] || 0) + 1 })
+
+  // PV signes
+  const pvSignes = decMois.filter(d => d.signature && d.signature.signed).length
+
+  return {
+    mois,
+    generated_at: new Date().toISOString(),
+    indicateurs: {
+      nb_decisions_cal: decMois.length,
+      nb_pv_signes: pvSignes,
+      nb_audiences: audMois.length,
+      nb_favorables: audMois.filter(a => a.favorable).length,
+      nb_attributions: attribuesMois.length,
+      nb_nouvelles_demandes: nvxDemandeurs.length,
+      taux_effort_moyen: teMoyen,
+      nb_dalo_attribues: daloAttribues,
+      compliance_dalo_pct: attribuesMois.length ? Math.round(daloAttribues / attribuesMois.length * 100) : 0,
+      nb_courriers: courriersMois.length
+    },
+    repartition: {
+      par_quartier_attribue: parQuartierAttr,
+      par_bailleur: parBailleur,
+      par_type_courrier: courriersParType
+    },
+    details: {
+      attributions: attribuesMois.map(a => {
+        const d = demandeurs.find(x => x.id === a.dem_id) || {}
+        const l = logements.find(x => x.id === a.logement_id) || {}
+        return {
+          date: a.date_audience,
+          candidat: (d.prenom || '') + ' ' + (d.nom || ''),
+          nud: d.nud,
+          logement: l.ref,
+          adresse: l.adresse,
+          bailleur: l.bailleur,
+          quartier: l.quartier,
+          typ: l.typ,
+          loyer: l.loyer,
+          dalo: !!d.dalo
+        }
+      }),
+      pv_signes: decMois.filter(d => d.signature && d.signature.signed).map(d => ({
+        id: d.id,
+        logement: d.logement_ref,
+        date: d.date_cal,
+        signe_par: d.signature.signed_by_name,
+        signe_le: d.signature.signed_at,
+        hash: d.signature.content_hash
+      }))
+    }
+  }
+}
+
+// Generer + archiver un rapport
+app.post('/api/rapports/generer-mensuel', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+  const mois = parseMois(req.body && req.body.mois)
+  const dir = getRapportsDir()
+  const path = join(dir, mois + '.json')
+  let rapport
+  const force = req.body && req.body.force
+  if (existsSync(path) && !force) {
+    rapport = JSON.parse(readFileSync(path, 'utf8'))
+  } else {
+    rapport = genererRapportMensuel(mois)
+    writeFileSync(path, JSON.stringify(rapport, null, 2), 'utf8')
+    addLog(req.user, 'RAPPORT_MENSUEL', 'mois: ' + mois + (force ? ' (force)' : ''))
+  }
+  res.json(rapport)
+})
+
+// Lister les rapports archives
+app.get('/api/rapports', requireAuth, (req, res) => {
+  const dir = getRapportsDir()
+  const fichiers = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse() : []
+  res.json(fichiers.map(f => {
+    const st = statSync(join(dir, f))
+    return { mois: f.replace('.json', ''), size: st.size, mtime: st.mtime }
+  }))
+})
+
+// Consulter un rapport archive (JSON brut)
+app.get('/api/rapports/:mois', requireAuth, (req, res) => {
+  const path = join(getRapportsDir(), req.params.mois + '.json')
+  if (!existsSync(path)) return res.status(404).json({ error: 'Rapport introuvable' })
+  res.json(JSON.parse(readFileSync(path, 'utf8')))
+})
+
+// Vue HTML imprimable du rapport
+app.get('/api/rapports/:mois/html', requireAuth, (req, res) => {
+  const path = join(getRapportsDir(), req.params.mois + '.json')
+  if (!existsSync(path)) return res.status(404).json({ error: 'Rapport introuvable' })
+  const r = JSON.parse(readFileSync(path, 'utf8'))
+  const i = r.indicateurs
+  const moisFr = new Date(r.mois + '-01').toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
+
+  const kv = (k, v, unite = '') => '<tr><td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;">' + k + '</td><td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;font-weight:700;color:#1e3a8a;text-align:right;">' + (v === null ? '-' : v) + unite + '</td></tr>'
+
+  const html = `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Rapport mensuel ${r.mois} - Logivia</title>
+<style>
+  body { font-family: 'Helvetica Neue', Arial, sans-serif; color: #111; max-width: 860px; margin: 30px auto; padding: 0 24px; }
+  h1 { color: #1e3a8a; border-bottom: 3px solid #1e3a8a; padding-bottom: 10px; }
+  h2 { color: #1e3a8a; margin-top: 28px; font-size: 16pt; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 11pt; }
+  th { background: #1e3a8a; color: #fff; padding: 9px; text-align: left; }
+  td { padding: 6px 10px; border-bottom: 1px solid #e2e8f0; }
+  .stat { display: inline-block; background: #f1f5f9; padding: 14px 20px; border-radius: 8px; margin: 6px; min-width: 140px; }
+  .stat b { display: block; font-size: 22pt; color: #1e3a8a; font-weight: 800; }
+  .stat span { font-size: 10pt; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+  .footer { margin-top: 40px; font-size: 10pt; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 10px; }
+  @media print { body { margin: 0; } .no-print { display: none; } }
+</style>
+</head>
+<body>
+<div class="no-print" style="text-align:right;margin-bottom:10px;">
+  <button onclick="window.print()" style="padding:8px 16px;background:#1e3a8a;color:#fff;border:none;border-radius:6px;cursor:pointer;">Imprimer / PDF</button>
+</div>
+<h1>Rapport mensuel &mdash; ${moisFr}</h1>
+<p style="color:#64748b;font-size:11pt;">Mairie de Saint-Denis de la Reunion &middot; Service Habitat &middot; Logivia v3.1<br>
+Genere le ${new Date(r.generated_at).toLocaleString('fr-FR')}</p>
+
+<h2>Indicateurs cles</h2>
+<div>
+  <div class="stat"><b>${i.nb_attributions}</b><span>Attributions</span></div>
+  <div class="stat"><b>${i.nb_decisions_cal}</b><span>Decisions CAL</span></div>
+  <div class="stat"><b>${i.nb_pv_signes}</b><span>PV signes</span></div>
+  <div class="stat"><b>${i.nb_audiences}</b><span>Audiences</span></div>
+  <div class="stat"><b>${i.nb_nouvelles_demandes}</b><span>Nouvelles demandes</span></div>
+  <div class="stat"><b>${i.compliance_dalo_pct}%</b><span>Conformite DALO</span></div>
+</div>
+
+<h2>Synthese</h2>
+<table>
+${kv('Nombre de CAL tenues', i.nb_decisions_cal)}
+${kv('PV signes electroniquement', i.nb_pv_signes)}
+${kv('Audiences elus', i.nb_audiences)}
+${kv('Audiences favorables', i.nb_favorables)}
+${kv('Attributions', i.nb_attributions)}
+${kv('Nouvelles demandes deposees', i.nb_nouvelles_demandes)}
+${kv('Taux effort moyen des attributions', i.taux_effort_moyen, '%')}
+${kv('DALO attribues', i.nb_dalo_attribues)}
+${kv('Conformite DALO (objectif 25%)', i.compliance_dalo_pct, '%')}
+${kv('Courriers envoyes', i.nb_courriers)}
+</table>
+
+<h2>Repartition par quartier (attributions)</h2>
+<table>
+<tr><th>Quartier</th><th style="text-align:right;">Nb</th></tr>
+${Object.entries(r.repartition.par_quartier_attribue).sort((a, b) => b[1] - a[1]).map(([q, n]) => '<tr><td>' + q + '</td><td style="text-align:right;font-weight:700;">' + n + '</td></tr>').join('') || '<tr><td colspan="2" style="color:#94a3b8;">Aucune attribution ce mois</td></tr>'}
+</table>
+
+<h2>Repartition par bailleur</h2>
+<table>
+<tr><th>Bailleur</th><th style="text-align:right;">Nb decisions</th></tr>
+${Object.entries(r.repartition.par_bailleur).sort((a, b) => b[1] - a[1]).map(([k, n]) => '<tr><td>' + k + '</td><td style="text-align:right;font-weight:700;">' + n + '</td></tr>').join('') || '<tr><td colspan="2" style="color:#94a3b8;">-</td></tr>'}
+</table>
+
+<h2>Detail des attributions (${r.details.attributions.length})</h2>
+<table>
+<tr><th>Date</th><th>Candidat</th><th>Logement</th><th>Quartier</th><th>Bailleur</th><th>Loyer</th><th>DALO</th></tr>
+${r.details.attributions.map(a => '<tr><td>' + (a.date || '-') + '</td><td>' + (a.candidat || '-') + '</td><td>' + (a.logement || '-') + ' (' + (a.typ || '-') + ')</td><td>' + (a.quartier || '-') + '</td><td>' + (a.bailleur || '-') + '</td><td style="text-align:right;">' + (a.loyer || 0) + ' EUR</td><td>' + (a.dalo ? 'Oui' : '-') + '</td></tr>').join('') || '<tr><td colspan="7" style="color:#94a3b8;">Aucune attribution</td></tr>'}
+</table>
+
+<h2>PV signes electroniquement (${r.details.pv_signes.length})</h2>
+<table>
+<tr><th>Date CAL</th><th>PV</th><th>Signataire</th><th>Horodatage</th><th>Hash</th></tr>
+${r.details.pv_signes.map(p => '<tr><td>' + (p.date || '-') + '</td><td>' + (p.logement || p.id) + '</td><td>' + (p.signe_par || '-') + '</td><td style="font-size:10pt;">' + new Date(p.signe_le).toLocaleString('fr-FR') + '</td><td style="font-family:monospace;font-size:9pt;">' + (p.hash || '').substring(0, 20) + '...</td></tr>').join('') || '<tr><td colspan="5" style="color:#94a3b8;">Aucun PV signe</td></tr>'}
+</table>
+
+<div class="footer">
+  Rapport archive dans Logivia. Conforme au Code de la construction et de l habitation (art. L441-2-1).<br>
+  Mairie de Saint-Denis de la Reunion - 2 rue de Paris, 97400 Saint-Denis.
+</div>
+</body>
+</html>`
+  res.type('html').send(html)
+})
+
+// Envoi du digest mensuel sur Telegram (destinataires : directeur + agents connectes)
+app.post('/api/rapports/:mois/envoyer-telegram', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
+  const path = join(getRapportsDir(), req.params.mois + '.json')
+  if (!existsSync(path)) return res.status(404).json({ error: 'Rapport introuvable' })
+  const r = JSON.parse(readFileSync(path, 'utf8'))
+  const i = r.indicateurs
+  const moisFr = new Date(r.mois + '-01').toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
+
+  const msg = '<b>[RAPPORT] Rapport mensuel - ' + moisFr + '</b>\n' +
+    '<i>Mairie de Saint-Denis (974) - Service Habitat</i>\n\n' +
+    '<b>Indicateurs cles</b>\n' +
+    '- Attributions : <b>' + i.nb_attributions + '</b>\n' +
+    '- CAL tenues : ' + i.nb_decisions_cal + ' (dont ' + i.nb_pv_signes + ' PV signes)\n' +
+    '- Audiences : ' + i.nb_audiences + ' (favorables : ' + i.nb_favorables + ')\n' +
+    '- Nouvelles demandes : ' + i.nb_nouvelles_demandes + '\n' +
+    '- Taux effort moyen : ' + (i.taux_effort_moyen || '-') + '%\n' +
+    '- Conformite DALO : <b>' + i.compliance_dalo_pct + '%</b> ' + (i.compliance_dalo_pct >= 25 ? '[OK]' : '[KO]') + '\n' +
+    '- Courriers : ' + i.nb_courriers + '\n\n' +
+    '<i>Rapport complet disponible dans Logivia.</i>'
+
+  // Destinataires : tous les users (agent/directeur) avec chat_id
+  const users = readData('users.json').filter(u => (u.role === 'directeur' || u.role === 'agent') && u.actif)
+  const chats = users.map(u => tgGetChatId('user_' + u.id)).filter(Boolean)
+  // Fallback : aussi les elus si demande
+  if (req.body && req.body.inclure_elus) {
+    const elus = readObj('referentiels.json', { elus: [] }).elus || []
+    elus.forEach(e => { const c = tgGetChatId('elu_' + e.id); if (c) chats.push(c) })
+  }
+
+  let envoyes = 0
+  for (const chat of chats) {
+    const ok = await tgSend(chat, msg)
+    if (ok) envoyes++
+  }
+
+  addLog(req.user, 'RAPPORT_TELEGRAM', 'mois: ' + r.mois + ' - envois: ' + envoyes + '/' + chats.length)
+  res.json({ ok: true, envoyes, total: chats.length })
+})
+
+// Cron endpoint : appelable par un scheduler externe pour generer auto le rapport
+// du mois precedent le 1er de chaque mois. Protege par secret en query.
+app.post('/api/rapports/cron', (req, res) => {
+  const secret = req.query.secret || (req.body && req.body.secret)
+  if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Secret cron invalide' })
+  }
+  const d = new Date()
+  d.setDate(1); d.setMonth(d.getMonth() - 1)
+  const mois = d.toISOString().substring(0, 7)
+  const dir = getRapportsDir()
+  const path = join(dir, mois + '.json')
+  const rapport = genererRapportMensuel(mois)
+  writeFileSync(path, JSON.stringify(rapport, null, 2), 'utf8')
+  // Envoi Telegram automatique
+  const users = readData('users.json').filter(u => (u.role === 'directeur' || u.role === 'agent') && u.actif)
+  const chats = users.map(u => tgGetChatId('user_' + u.id)).filter(Boolean)
+  const i = rapport.indicateurs
+  const moisFr = new Date(mois + '-01').toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
+  const msg = '<b>[AUTO] Rapport mensuel - ' + moisFr + '</b>\n' +
+    '- Attributions : <b>' + i.nb_attributions + '</b>\n' +
+    '- CAL : ' + i.nb_decisions_cal + ' (PV signes : ' + i.nb_pv_signes + ')\n' +
+    '- Conformite DALO : ' + i.compliance_dalo_pct + '%'
+  Promise.all(chats.map(c => tgSend(c, msg))).then(r2 => {
+    console.log('[cron rapport] mois ' + mois + ' - envois Telegram : ' + r2.filter(Boolean).length + '/' + chats.length)
+  }).catch(e => console.error('[cron rapport] ', e.message))
+  res.json({ ok: true, mois, indicateurs: rapport.indicateurs, destinataires: chats.length })
+})
+
+// ============================================================
 // PORTAIL CANDIDAT (public)
 // ============================================================
 
@@ -2087,7 +2421,7 @@ app.get('/api/telegram/elus-status', requireAuth, (req, res) => {
 //   en_etude : en instruction
 // ============================================================
 
-const COURRIER_STATUTS = ['en_attente', 'prioritaire', 'deja_livre', 'livre', 'refuse', 'en_etude']
+const COURRIER_STATUTS = ['en_attente', 'prioritaire', 'deja_livre', 'livre', 'refuse', 'en_etude', 'demande_pieces', 'relance']
 
 const COURRIER_TEMPLATES = {
   en_attente: {
@@ -2177,6 +2511,44 @@ Votre dossier (NUD ${dem.nud || '-'}) est actuellement en cours d etude par nos 
 Nous reviendrons vers vous une fois cette etude terminee.
 
 Service Habitat - Ville de Saint-Denis`
+  },
+  demande_pieces: {
+    libelle: 'Demande de pieces complementaires',
+    couleur: '#D97706',
+    objet: 'Votre demande de logement social - pieces complementaires a fournir',
+    corps: (dem, opts) =>
+`Madame, Monsieur ${dem.nom},
+
+Pour la poursuite de l instruction de votre dossier de demande de logement social (NUD ${dem.nud || '-'}), nous vous invitons a nous transmettre les pieces suivantes dans un delai de 30 jours a compter de la reception du present courrier :
+
+${(opts && opts.pieces && opts.pieces.length ? opts.pieces : ['Avis d imposition de l annee N-1', 'Derniers bulletins de salaire (3 derniers mois)', 'Justificatif de domicile de moins de 3 mois', 'Livret de famille', 'Piece d identite en cours de validite']).map((p, i) => '- ' + p).join('\n')}
+
+Passe ce delai, et faute de retour, votre dossier pourra etre considere comme incomplet et sa prise en compte reportee.
+
+Vous pouvez deposer ces pieces :
+- par voie postale au Service Habitat, 2 rue de Paris, 97400 Saint-Denis
+- ou directement sur votre espace candidat via le portail en ligne
+
+Nous vous prions d agreer, Madame, Monsieur, l expression de nos salutations distinguees.
+
+Service Habitat - Mairie de Saint-Denis de La Reunion`
+  },
+  relance: {
+    libelle: 'Relance',
+    couleur: '#E05C2A',
+    objet: 'Relance - votre dossier de demande de logement social',
+    corps: (dem, opts) =>
+`Madame, Monsieur ${dem.nom},
+
+Sauf erreur de notre part, nous n avons pas recu de votre part ${opts && opts.objet_relance ? 'le/les element(s) suivant(s) : ' + opts.objet_relance : 'les elements attendus pour la poursuite de l instruction de votre dossier'} (NUD ${dem.nud || '-'}).
+
+Afin d eviter la mise en inactivite de votre demande, merci de nous faire parvenir ces elements dans les 15 jours qui suivent la reception du present courrier.
+
+Pour toute question, vous pouvez contacter le Service Habitat aux heures d ouverture au public.
+
+Nous vous prions d agreer, Madame, Monsieur, l expression de nos salutations distinguees.
+
+Service Habitat - Mairie de Saint-Denis de La Reunion`
   }
 }
 
@@ -2210,7 +2582,7 @@ app.get('/api/courriers/stats', requireAuth, (req, res) => {
 
 // Creer un courrier et l envoyer (Telegram si dispo + enregistrement)
 app.post('/api/courriers', requireAuth, async (req, res) => {
-  const { dem_id, statut, objet, corps, envoyer_telegram } = req.body || {}
+  const { dem_id, statut, objet, corps, envoyer_telegram, pieces, objet_relance, logement_ref, bailleur } = req.body || {}
   if (!dem_id || !statut) return res.status(400).json({ error: 'dem_id et statut requis' })
   if (!COURRIER_STATUTS.includes(statut)) return res.status(400).json({ error: 'statut invalide' })
   const demandeurs = readData('demandeurs.json')
@@ -2219,6 +2591,7 @@ app.post('/api/courriers', requireAuth, async (req, res) => {
 
   const tpl = COURRIER_TEMPLATES[statut]
   const all = readData('courriers.json')
+  const opts = { pieces, objet_relance, logement_ref, bailleur }
   const courrier = {
     id: nextId(all, 'CO'),
     dem_id,
@@ -2227,7 +2600,8 @@ app.post('/api/courriers', requireAuth, async (req, res) => {
     statut,
     libelle_statut: tpl.libelle,
     objet: objet || tpl.objet,
-    corps: corps || tpl.corps(dem),
+    corps: corps || tpl.corps(dem, opts),
+    options: opts,
     cree_par: req.user.nom || req.user.login,
     role: req.user.role,
     date_creation: nowDate(),
@@ -2279,6 +2653,122 @@ app.post('/api/courriers', requireAuth, async (req, res) => {
   addAudit(req.user, 'demandeur', dem_id, dem.nom + ' ' + dem.prenom, 'courrier_' + statut, [{ label: 'Courrier officiel', avant: '-', apres: tpl.libelle }], 'Courrier officiel : ' + tpl.libelle)
 
   res.json(courrier)
+})
+
+// ============================================================
+// PDF COURRIER : HTML imprimable avec en-tete mairie 974
+// - previsualisation : GET /api/courriers/:id/pdf (courrier existant)
+// - apercu direct : POST /api/courriers/preview (sans creer le courrier)
+// Format : HTML avec print CSS. L utilisateur fait "Imprimer > Sauver PDF".
+// ============================================================
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+function renderCourrierHtml(courrier, dem) {
+  const tpl = COURRIER_TEMPLATES[courrier.statut] || { libelle: courrier.statut, couleur: '#E05C2A' }
+  const dateFr = new Date(courrier.date_creation || Date.now()).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
+  const adresseDem = [dem.adresse, dem.code_postal, dem.ville].filter(Boolean).join(' ')
+  const corpsHtml = escapeHtml(courrier.corps).split('\n').map(l => l.trim() ? '<p>' + l + '</p>' : '<p>&nbsp;</p>').join('')
+  const ref = 'Ref : ' + (courrier.id || 'CO') + ' / NUD : ' + (dem.nud || '-')
+  return `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>${escapeHtml(courrier.objet)} - ${escapeHtml(dem.nom)}</title>
+<style>
+  @page { size: A4; margin: 18mm 18mm 22mm 18mm; }
+  body { font-family: 'Helvetica Neue', Arial, sans-serif; color: #111; font-size: 11.5pt; line-height: 1.55; margin: 0; }
+  .entete { display: flex; gap: 18px; align-items: flex-start; border-bottom: 2px solid #E05C2A; padding-bottom: 14px; margin-bottom: 26px; }
+  .logo { width: 70px; height: 70px; background: #E05C2A; color: #fff; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 26px; flex-shrink: 0; }
+  .entete .txt { flex: 1; }
+  .entete h1 { margin: 0; font-size: 17pt; color: #0F172A; letter-spacing: -0.01em; }
+  .entete .sub { font-size: 10pt; color: #475569; margin-top: 2px; }
+  .entete .sub b { color: #E05C2A; }
+  .meta { display: flex; justify-content: space-between; margin-bottom: 22px; font-size: 10pt; color: #475569; }
+  .destinataire { text-align: right; margin: 22px 0 30px; font-size: 11.5pt; }
+  .destinataire b { color: #0F172A; }
+  .objet { background: #FEF3E9; border-left: 4px solid #E05C2A; padding: 10px 14px; margin: 18px 0 22px; font-weight: 600; font-size: 11pt; }
+  .corps p { margin: 0 0 10px; text-align: justify; }
+  .signature { margin-top: 50px; display: flex; justify-content: space-between; align-items: flex-end; }
+  .signature .sig-box { width: 260px; }
+  .signature .sig-box .line { border-top: 1px solid #94A3B8; margin-top: 55px; padding-top: 6px; font-size: 10pt; color: #475569; text-align: center; }
+  .footer { margin-top: 44px; border-top: 1px solid #E2E8F0; padding-top: 10px; font-size: 9pt; color: #64748B; text-align: center; }
+  .no-print { text-align: right; margin: 10px 0 20px; }
+  .no-print button { padding: 10px 20px; background: #E05C2A; color: #fff; border: none; border-radius: 8px; font-size: 12pt; font-weight: 700; cursor: pointer; }
+  @media print { .no-print { display: none; } body { margin: 0; } }
+</style>
+</head>
+<body>
+  <div class="no-print">
+    <button onclick="window.print()">Imprimer / Sauver en PDF</button>
+  </div>
+  <div class="entete">
+    <div class="logo">SD</div>
+    <div class="txt">
+      <h1>Mairie de Saint-Denis</h1>
+      <div class="sub"><b>La Reunion (974)</b> &middot; Service Habitat &middot; Commission d Attribution des Logements</div>
+      <div class="sub">2 rue de Paris, 97400 Saint-Denis &middot; Tel : 02 62 40 62 62</div>
+    </div>
+  </div>
+  <div class="meta">
+    <div>${escapeHtml(ref)}</div>
+    <div>Saint-Denis, le ${escapeHtml(dateFr)}</div>
+  </div>
+  <div class="destinataire">
+    <b>${escapeHtml(dem.civilite || '')} ${escapeHtml(dem.prenom || '')} ${escapeHtml(dem.nom || '')}</b><br>
+    ${escapeHtml(adresseDem) || '&nbsp;'}
+  </div>
+  <div class="objet"><b>Objet :</b> ${escapeHtml(courrier.objet)}</div>
+  <div class="corps">${corpsHtml}</div>
+  <div class="signature">
+    <div></div>
+    <div class="sig-box">
+      <div class="line">Pour le Maire, l Adjoint delegue au Logement</div>
+    </div>
+  </div>
+  <div class="footer">
+    Mairie de Saint-Denis &middot; Service Habitat &middot; www.saintdenis.re &middot; Document genere le ${escapeHtml(new Date().toLocaleString('fr-FR'))}
+  </div>
+</body>
+</html>`
+}
+
+// Telechargement PDF d un courrier existant (retourne HTML imprimable)
+app.get('/api/courriers/:id/pdf', requireAuth, (req, res) => {
+  const all = readData('courriers.json')
+  const courrier = all.find(c => c.id === req.params.id)
+  if (!courrier) return res.status(404).send('Courrier introuvable')
+  const demandeurs = readData('demandeurs.json')
+  const dem = demandeurs.find(d => d.id === courrier.dem_id) || {}
+  res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.send(renderCourrierHtml(courrier, dem))
+})
+
+// Apercu imprimable avant creation (pour les 4 boutons : genere le courrier ET affiche le PDF)
+app.post('/api/courriers/preview', requireAuth, (req, res) => {
+  const { dem_id, statut, objet, corps, pieces, objet_relance, logement_ref, bailleur } = req.body || {}
+  if (!dem_id || !statut) return res.status(400).json({ error: 'dem_id et statut requis' })
+  if (!COURRIER_STATUTS.includes(statut)) return res.status(400).json({ error: 'statut invalide' })
+  const demandeurs = readData('demandeurs.json')
+  const dem = demandeurs.find(d => d.id === dem_id)
+  if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
+  const tpl = COURRIER_TEMPLATES[statut]
+  const opts = { pieces, objet_relance, logement_ref, bailleur }
+  const courrier = {
+    id: 'APERCU',
+    dem_id,
+    statut,
+    libelle_statut: tpl.libelle,
+    objet: objet || tpl.objet,
+    corps: corps || tpl.corps(dem, opts),
+    date_creation: nowDate()
+  }
+  res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.send(renderCourrierHtml(courrier, dem))
 })
 
 // Changer le statut d un courrier (reclassification)
@@ -3194,6 +3684,125 @@ app.put('/api/relances/:id/traiter', requireAuth, (req, res) => {
 })
 
 // ============================================================
+// PV CAL - SIGNATURE ELECTRONIQUE (PIN directeur + hash + horodatage)
+// ============================================================
+
+/**
+ * Le directeur signe electroniquement un PV de CAL avec son PIN personnel.
+ * Un hash SHA-256 du contenu de la decision est calcule + horodatage ISO + qui signe.
+ * Ces trois elements constituent la "signature" et sont stockes sur la decision.
+ * Le hash permet de detecter toute modification ulterieure (integrite).
+ */
+function hashDecision(dec) {
+  // Canonical JSON : on trie les cles et on enleve les champs de signature
+  const clone = { ...dec }
+  delete clone.signature
+  const sorted = JSON.stringify(clone, Object.keys(clone).sort())
+  return createHash('sha256').update(sorted, 'utf8').digest('hex')
+}
+
+app.post('/api/cal/pv/:decision_id/signer', requireAuth, requireRole('directeur'), (req, res) => {
+  const { pin } = req.body || {}
+  if (!pin || typeof pin !== 'string' || pin.length < 4) {
+    return res.status(400).json({ error: 'PIN requis (4 chiffres minimum)' })
+  }
+
+  // Recuperer le user complet (avec pin) - requireAuth ne renvoie pas le pin
+  const users = readData('users.json')
+  const user = users.find(u => u.id === req.user.id)
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' })
+
+  // Le PIN peut etre stocke en clair sur le user (champ pin) ou dans l'env DIRECTEUR_PIN
+  const expectedPin = user.pin || process.env.DIRECTEUR_PIN || ''
+  if (!expectedPin) {
+    return res.status(400).json({
+      error: 'Aucun PIN configure. Le directeur doit d abord definir son PIN via /api/auth/set-pin ou la variable DIRECTEUR_PIN.'
+    })
+  }
+  if (pin !== expectedPin) {
+    addLog(req.user, 'PV_SIGNATURE_PIN_KO', 'decision: ' + req.params.decision_id)
+    return res.status(401).json({ error: 'PIN incorrect' })
+  }
+
+  const decisions = readData('decisions_cal.json')
+  const idx = decisions.findIndex(d => d.id === req.params.decision_id)
+  if (idx === -1) return res.status(404).json({ error: 'Decision introuvable' })
+
+  const dec = decisions[idx]
+  if (dec.signature && dec.signature.signed) {
+    return res.status(409).json({ error: 'Ce PV est deja signe', signature: dec.signature })
+  }
+
+  const horodatage = new Date().toISOString()
+  const hash = hashDecision(dec)
+  // Signature = hash salted par le nom du signataire + horodatage
+  const sig = createHash('sha256').update(hash + '|' + req.user.id + '|' + horodatage, 'utf8').digest('hex')
+
+  dec.signature = {
+    signed: true,
+    signed_by_id: req.user.id,
+    signed_by_name: req.user.prenom + ' ' + req.user.nom,
+    signed_by_role: req.user.role,
+    signed_at: horodatage,
+    content_hash: hash,
+    signature_hash: sig,
+    algorithm: 'SHA-256',
+    pin_verified: true
+  }
+  decisions[idx] = dec
+  writeData('decisions_cal.json', decisions)
+
+  addLog(req.user, 'PV_SIGNATURE', 'decision: ' + dec.id + ' - hash: ' + sig.substring(0, 12))
+  addAudit(req.user, 'decision_cal', dec.id, dec.nom_commission || dec.id, 'signature', [
+    { champ: 'signature', label: 'Signature electronique', avant: 'non signe', apres: 'signe par ' + req.user.prenom + ' ' + req.user.nom }
+  ], 'Signature electronique du PV CAL')
+
+  res.json({ ok: true, signature: dec.signature })
+})
+
+/**
+ * Verification d'integrite : recalcule le hash et compare.
+ */
+app.get('/api/cal/pv/:decision_id/verifier', requireAuth, (req, res) => {
+  const decisions = readData('decisions_cal.json')
+  const dec = decisions.find(d => d.id === req.params.decision_id)
+  if (!dec) return res.status(404).json({ error: 'Decision introuvable' })
+  if (!dec.signature || !dec.signature.signed) {
+    return res.json({ signed: false })
+  }
+  const recalcule = hashDecision(dec)
+  const valide = recalcule === dec.signature.content_hash
+  res.json({
+    signed: true,
+    valide,
+    hash_stocke: dec.signature.content_hash,
+    hash_recalcule: recalcule,
+    signature: dec.signature
+  })
+})
+
+/**
+ * Definir / changer son PIN (directeur uniquement).
+ */
+app.post('/api/auth/set-pin', requireAuth, requireRole('directeur'), (req, res) => {
+  const { pin, password } = req.body || {}
+  if (!pin || !/^\d{4,8}$/.test(pin)) {
+    return res.status(400).json({ error: 'PIN invalide (4 a 8 chiffres)' })
+  }
+  const users = readData('users.json')
+  const idx = users.findIndex(u => u.id === req.user.id)
+  if (idx === -1) return res.status(404).json({ error: 'Utilisateur introuvable' })
+  // Confirmation par mot de passe
+  if (users[idx].password !== password) {
+    return res.status(401).json({ error: 'Mot de passe incorrect' })
+  }
+  users[idx].pin = pin
+  writeData('users.json', users)
+  addLog(req.user, 'SET_PIN', 'PIN directeur mis a jour')
+  res.json({ ok: true })
+})
+
+// ============================================================
 // PV CAL - generation HTML imprimable (type PDF)
 // ============================================================
 
@@ -3299,10 +3908,36 @@ ${dec.motif ? `<p><b>Motif :</b> ${dec.motif}</p>` : ''}
   <div class="sig">Le Secretaire<br>&nbsp;</div>
 </div>
 
+${dec.signature && dec.signature.signed ? `
+<div style="margin-top: 40px; padding: 16px; border: 2px solid #16a34a; border-radius: 8px; background: #f0fdf4;">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+    <b style="color: #166534; font-size: 13pt;">&#10004; PV signe electroniquement</b>
+    <span style="font-size: 10pt; color: #16a34a; font-weight: 600;">Algorithme : ${dec.signature.algorithm || 'SHA-256'}</span>
+  </div>
+  <div style="font-size: 11pt; color: #166534; line-height: 1.7;">
+    <b>Signataire :</b> ${dec.signature.signed_by_name || ''} (${dec.signature.signed_by_role || 'directeur'})<br>
+    <b>Horodatage :</b> ${new Date(dec.signature.signed_at).toLocaleString('fr-FR', { dateStyle: 'full', timeStyle: 'medium' })}<br>
+    <b>Empreinte du contenu (hash) :</b><br>
+    <code style="font-size: 9pt; color: #1e293b; background: #fff; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; word-break: break-all; display: inline-block; max-width: 100%;">${dec.signature.content_hash || ''}</code><br>
+    <b>Signature :</b><br>
+    <code style="font-size: 9pt; color: #1e293b; background: #fff; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; word-break: break-all; display: inline-block; max-width: 100%;">${dec.signature.signature_hash || ''}</code>
+  </div>
+  <div style="margin-top: 10px; font-size: 9pt; color: #475569; font-style: italic;">
+    La signature electronique ci-dessus garantit l integrite et la non-repudiation du present PV.
+    Toute modification ulterieure du contenu invalide la signature. Verification : GET /api/cal/pv/${dec.id}/verifier
+  </div>
+</div>
+` : `
+<div style="margin-top: 40px; padding: 12px; border: 1px dashed #94a3b8; border-radius: 8px; background: #f8fafc;">
+  <b style="color: #64748b;">PV non signe electroniquement</b><br>
+  <span style="font-size: 10pt; color: #64748b;">Le directeur peut signer ce PV avec son PIN personnel (bouton "Signer le PV" dans l interface).</span>
+</div>
+`}
+
 <div class="footer">
   PV genere automatiquement par Logivia v3.0 - Ville de Saint-Denis.<br>
   Conformement au Code de la construction et de l'habitation, art. L441-2, ce PV est a conserver 10 ans.<br>
-  Signature electronique eIDAS : en attente d'integration (DocuSign / Yousign).
+  ${dec.signature && dec.signature.signed ? 'Signature electronique conforme aux principes eIDAS (integrite + horodatage + identification).' : 'Signature electronique disponible via PIN directeur.'}
 </div>
 </body>
 </html>`

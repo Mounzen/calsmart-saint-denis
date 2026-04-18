@@ -962,6 +962,212 @@ function Logements({ goMatch }) {
 }
 
 // ===========================================================
+// STATUT PROGRESSION : barre de progression dossier
+// Etapes : Reçu -> En étude -> En CAL -> Attribué
+// Badges overlay : Incomplet / Refusé
+// ===========================================================
+
+function StatutProgression({ dem, compact = false }) {
+  const etapes = ['Reçu', 'En étude', 'En CAL', 'Attribué']
+  // Deduire l etape courante
+  let currentIdx = 0 // Reçu par défaut
+  if (dem.pieces) currentIdx = 1 // dossier complet => en étude
+  // Si un event "Présentation CAL" ou "Audience" existe dans parcours => En CAL
+  const parc = Array.isArray(dem.parcours) ? dem.parcours : []
+  if (parc.some(p => /CAL|Commission|Audience/i.test(p.type || ''))) currentIdx = 2
+  if (dem.statut === 'attribue') currentIdx = 3
+
+  const refuse = parc.some(p => /refus/i.test((p.type || '') + ' ' + (p.detail || '')))
+  const incomplet = !dem.pieces
+
+  return (
+    <div style={{ background: C.card, borderRadius: 12, padding: compact ? '12px 14px' : '14px 18px', border: '1px solid ' + C.border, marginBottom: 14 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div style={{ fontFamily: Fh, fontSize: 11, fontWeight: 700, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.07em' }}>Statut du dossier</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {incomplet && <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 9px', borderRadius: 99, background: C.amberBg, color: C.amber }}>Incomplet</span>}
+          {refuse && <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 9px', borderRadius: 99, background: C.redBg, color: C.red }}>Refusé</span>}
+          {dem.statut === 'annule' && <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 9px', borderRadius: 99, background: C.redBg, color: C.red }}>Annulé</span>}
+        </div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 0, position: 'relative' }}>
+        {etapes.map((e, i) => {
+          const done = i <= currentIdx
+          const current = i === currentIdx
+          return (
+            <div key={e} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', position: 'relative' }}>
+              {i > 0 && (
+                <div style={{ position: 'absolute', left: 'calc(-50% + 14px)', right: 'calc(50% + 14px)', top: 10, height: 3, background: done ? C.accent : C.border, zIndex: 0 }} />
+              )}
+              <div style={{ width: 24, height: 24, borderRadius: '50%', background: done ? C.accent : C.card, border: '2px solid ' + (done ? C.accent : C.border), display: 'flex', alignItems: 'center', justifyContent: 'center', color: done ? '#fff' : C.muted, fontSize: 11, fontWeight: 800, fontFamily: Fh, zIndex: 1, boxShadow: current ? '0 0 0 4px ' + C.accent + '33' : 'none' }}>
+                {done ? '✓' : (i + 1)}
+              </div>
+              <div style={{ marginTop: 6, fontSize: 10.5, fontWeight: current ? 800 : 600, color: done ? C.accent : C.muted, fontFamily: Fh, textAlign: 'center' }}>{e}</div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ===========================================================
+// COURRIER PDF MODAL : 4 types (attribution, refus, demande_pieces, relance)
+// Ouvre un PDF imprimable dans un nouvel onglet + enregistre le courrier
+// ===========================================================
+
+const COURRIER_TYPE_META = {
+  livre: { title: 'Attribution de logement', color: '#16A34A', envoyable: true },
+  refuse: { title: 'Refus motivé', color: '#DC2626', envoyable: true },
+  demande_pieces: { title: 'Demande de pièces complémentaires', color: '#D97706', envoyable: true },
+  relance: { title: 'Relance', color: '#E05C2A', envoyable: true }
+}
+
+const PIECES_PRESETS = [
+  'Avis d imposition de l annee N-1',
+  'Derniers bulletins de salaire (3 derniers mois)',
+  'Justificatif de domicile de moins de 3 mois',
+  'Livret de famille',
+  'Piece d identite en cours de validite',
+  'Attestation CAF',
+  'Quittances de loyer des 3 derniers mois',
+  'Justificatif de situation professionnelle',
+  'Certificat medical (si handicap)',
+  'Ordonnance de protection (si VIF)'
+]
+
+function CourrierPDFModal({ dem, type, onClose, toast, onSaved }) {
+  const meta = COURRIER_TYPE_META[type] || { title: type, color: '#E05C2A' }
+  const [piecesSel, setPiecesSel] = useState(type === 'demande_pieces' ? PIECES_PRESETS.slice(0, 5) : [])
+  const [pieceLibre, setPieceLibre] = useState('')
+  const [objetRelance, setObjetRelance] = useState('')
+  const [logementRef, setLogementRef] = useState('')
+  const [bailleur, setBailleur] = useState('')
+  const [envoyerTg, setEnvoyerTg] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  const togglePiece = (p) => setPiecesSel(prev =>
+    prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]
+  )
+  const addPieceLibre = () => {
+    const v = pieceLibre.trim()
+    if (!v) return
+    if (!piecesSel.includes(v)) setPiecesSel([...piecesSel, v])
+    setPieceLibre('')
+  }
+
+  const buildBody = () => ({
+    dem_id: dem.id,
+    statut: type,
+    pieces: type === 'demande_pieces' ? piecesSel : undefined,
+    objet_relance: type === 'relance' ? objetRelance : undefined,
+    logement_ref: type === 'livre' ? logementRef : undefined,
+    bailleur: type === 'livre' ? bailleur : undefined,
+    envoyer_telegram: envoyerTg
+  })
+
+  const apercu = async () => {
+    // Ouvre un nouvel onglet avec le PDF (HTML imprimable)
+    setBusy(true)
+    try {
+      const token = getToken()
+      const r = await fetch('/api/courriers/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-auth-token': token || '' },
+        body: JSON.stringify(buildBody())
+      })
+      if (!r.ok) throw new Error('Aperçu refusé (' + r.status + ')')
+      const html = await r.text()
+      const blob = new Blob([html], { type: 'text/html' })
+      const url = URL.createObjectURL(blob)
+      const w = window.open(url, '_blank')
+      if (!w) {
+        // Popup bloquée : téléchargement direct
+        const a = document.createElement('a'); a.href = url; a.download = 'courrier_' + type + '_' + dem.id + '.html'; a.click()
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 5000)
+    } catch (e) { toast('Erreur aperçu : ' + e.message, 'error') }
+    finally { setBusy(false) }
+  }
+
+  const saveAndOpen = async () => {
+    setBusy(true)
+    try {
+      const created = await api('/courriers', { method: 'POST', body: buildBody() })
+      // Ouvre le PDF du courrier fraîchement créé
+      const token = getToken()
+      const r = await fetch('/api/courriers/' + created.id + '/pdf', {
+        headers: { 'x-auth-token': token || '' }
+      })
+      if (r.ok) {
+        const html = await r.text()
+        const blob = new Blob([html], { type: 'text/html' })
+        const url = URL.createObjectURL(blob)
+        window.open(url, '_blank')
+        setTimeout(() => URL.revokeObjectURL(url), 5000)
+      }
+      toast('Courrier enregistré' + (envoyerTg ? ' et envoyé par Telegram' : ''), 'success')
+      onSaved && onSaved()
+    } catch (e) { toast('Erreur : ' + e.message, 'error') }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={meta.title + ' - ' + dem.nom + ' ' + dem.prenom} onClose={onClose} maxW={620}>
+      <div style={{ background: meta.color + '15', border: '1px solid ' + meta.color + '44', borderRadius: 9, padding: '10px 14px', fontSize: 12, color: meta.color, marginBottom: 16, fontWeight: 600 }}>
+        Courrier officiel pour {dem.nom} {dem.prenom} (NUD {dem.nud || '-'})
+      </div>
+
+      {type === 'demande_pieces' && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, color: C.text }}>Pièces à demander</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 10 }}>
+            {PIECES_PRESETS.map(p => (
+              <label key={p} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, cursor: 'pointer', padding: '6px 8px', borderRadius: 6, background: piecesSel.includes(p) ? C.accentL : 'transparent', color: piecesSel.includes(p) ? C.accent : C.text }}>
+                <input type="checkbox" checked={piecesSel.includes(p)} onChange={() => togglePiece(p)} /> {p}
+              </label>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input style={{ ...inp, flex: 1 }} value={pieceLibre} onChange={e => setPieceLibre(e.target.value)} placeholder="Ajouter une pièce personnalisée..." onKeyDown={e => { if (e.key === 'Enter') addPieceLibre() }} />
+            <button onClick={addPieceLibre} style={{ padding: '8px 14px', background: C.blue, color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>+ Ajouter</button>
+          </div>
+          {piecesSel.filter(p => !PIECES_PRESETS.includes(p)).length > 0 && (
+            <div style={{ marginTop: 8, fontSize: 11, color: C.muted }}>
+              Pièces personnalisées : {piecesSel.filter(p => !PIECES_PRESETS.includes(p)).join(', ')}
+            </div>
+          )}
+        </div>
+      )}
+
+      {type === 'relance' && (
+        <Field label="Objet de la relance (optionnel)">
+          <input style={inp} value={objetRelance} onChange={e => setObjetRelance(e.target.value)} placeholder="Ex: les bulletins de salaire manquants" />
+        </Field>
+      )}
+
+      {type === 'livre' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 8 }}>
+          <Field label="Référence logement"><input style={inp} value={logementRef} onChange={e => setLogementRef(e.target.value)} placeholder="Ex: SIDR-341" /></Field>
+          <Field label="Bailleur"><input style={inp} value={bailleur} onChange={e => setBailleur(e.target.value)} placeholder="Ex: SIDR" /></Field>
+        </div>
+      )}
+
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, marginTop: 14, cursor: 'pointer', padding: '10px 12px', borderRadius: 8, background: envoyerTg ? '#229ED920' : C.bg, color: envoyerTg ? '#229ED9' : C.text, border: '1px solid ' + (envoyerTg ? '#229ED9' : C.border) }}>
+        <input type="checkbox" checked={envoyerTg} onChange={e => setEnvoyerTg(e.target.checked)} />
+        Envoyer aussi par Telegram (si le candidat est connecté au bot)
+      </label>
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 20 }}>
+        <button onClick={onClose} disabled={busy} style={{ padding: '9px 16px', border: '1px solid ' + C.border, borderRadius: 8, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 600, color: C.muted }}>Annuler</button>
+        <button onClick={apercu} disabled={busy} style={{ padding: '9px 16px', border: '1px solid ' + C.blue, borderRadius: 8, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.blue }}>Aperçu sans enregistrer</button>
+        <button onClick={saveAndOpen} disabled={busy} style={{ padding: '9px 20px', background: meta.color, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>{busy ? '...' : 'Enregistrer + ouvrir PDF'}</button>
+      </div>
+    </Modal>
+  )
+}
+
+// ===========================================================
 // DEMANDEURS
 // ===========================================================
 
@@ -980,6 +1186,7 @@ function Demandeurs() {
   const [archiveDem, setArchiveDem] = useState(null)
   const [archiveMotif, setArchiveMotif] = useState('')
   const [archiveLibre, setArchiveLibre] = useState('')
+  const [courrierModal, setCourrierModal] = useState(null) // { type, dem }
 
   const blank = {
     nom: '', prenom: '', nud: '', anc: '0', adultes: '1', enfants: '0',
@@ -1115,6 +1322,8 @@ function Demandeurs() {
               </div>
             </div>
 
+            <StatutProgression dem={sel} />
+
             <div style={{ display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center' }}>
               <select value={sel.statut || 'active'}
                 onChange={e => changerStatut(sel, e.target.value)}
@@ -1146,6 +1355,29 @@ function Demandeurs() {
                   <div style={{ fontSize: 12.5, fontWeight: 600, color: C.text, marginTop: 3 }}>{f.v}</div>
                 </div>
               ))}
+            </div>
+
+            {/* Courriers officiels PDF */}
+            <div style={{ background: C.card, borderRadius: 12, padding: 14, border: '1px solid ' + C.border, marginBottom: 14 }}>
+              <div style={{ fontFamily: Fh, fontSize: 11, fontWeight: 700, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 10 }}>Courriers officiels</div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button onClick={() => setCourrierModal({ type: 'livre', dem: sel })}
+                  style={{ padding: '9px 16px', background: C.green, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>
+                  Générer attribution
+                </button>
+                <button onClick={() => setCourrierModal({ type: 'refuse', dem: sel })}
+                  style={{ padding: '9px 16px', background: C.red, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>
+                  Générer refus
+                </button>
+                <button onClick={() => setCourrierModal({ type: 'demande_pieces', dem: sel })}
+                  style={{ padding: '9px 16px', background: C.amber, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>
+                  Générer demande de pièces
+                </button>
+                <button onClick={() => setCourrierModal({ type: 'relance', dem: sel })}
+                  style={{ padding: '9px 16px', background: C.accent, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>
+                  Générer relance
+                </button>
+              </div>
             </div>
 
             <div style={{ marginBottom: 14, display: 'flex', flexWrap: 'wrap', gap: 3 }}>
@@ -1317,6 +1549,16 @@ function Demandeurs() {
         />
       )}
 
+      {courrierModal && (
+        <CourrierPDFModal
+          dem={courrierModal.dem}
+          type={courrierModal.type}
+          onClose={() => setCourrierModal(null)}
+          toast={toast}
+          onSaved={() => { setCourrierModal(null); reload() }}
+        />
+      )}
+
       {archiveDem && (
         <Modal title={'Archiver - ' + archiveDem.nom + ' ' + archiveDem.prenom} onClose={() => setArchiveDem(null)}>
           <div style={{ background: C.redBg, border: '1px solid ' + C.red + '33', borderRadius: 9, padding: '10px 14px', fontSize: 12, color: C.red, marginBottom: 16, fontWeight: 600 }}>
@@ -1353,6 +1595,7 @@ function Matching({ initLog, addToCAL }) {
   const [selLog, setSelLog] = useState(initLog || null)
   const [results, setResults] = useState(null)
   const [matching, setMatching] = useState(false)
+  const [scoreDetail, setScoreDetail] = useState(null)
 
   const doMatch = useCallback(async (lg) => {
     setSelLog(lg)
@@ -1447,6 +1690,11 @@ function Matching({ initLog, addToCAL }) {
                     <div style={{ fontSize: 15, fontWeight: 700, fontFamily: Fh, color: parseFloat(x.res.te) <= 30 ? C.green : parseFloat(x.res.te) <= 35 ? C.amber : C.red }}>{x.res.te}%</div>
                     <div style={{ fontSize: 10, color: C.muted }}>effort</div>
                   </div>
+                  <button onClick={() => setScoreDetail(x)}
+                    style={{ padding: '7px 12px', background: C.accentL, color: C.accent, border: '1px solid ' + C.accent, borderRadius: 7, cursor: 'pointer', fontFamily: Fh, fontSize: 11.5, fontWeight: 700, flexShrink: 0 }}
+                    title="Voir le detail du score">
+                    Voir pourquoi
+                  </button>
                 </div>
               )
             })}
@@ -1466,7 +1714,206 @@ function Matching({ initLog, addToCAL }) {
           </>
         )}
       </div>
+      {scoreDetail && (
+        <ScoreDetailModal
+          candidate={scoreDetail}
+          logement={results && results.logement}
+          onClose={() => setScoreDetail(null)}
+        />
+      )}
     </div>
+  )
+}
+
+// ===========================================================
+// SCORE DETAIL MODAL - "Voir pourquoi"
+// ===========================================================
+
+function ScoreDetailModal({ candidate, logement, onClose }) {
+  const dem = candidate.dem
+  const res = candidate.res
+  const sc = res.scores || {}
+  const bm = res.bonus_malus || []
+
+  // Groupes logiques : revenus, famille, ancienneté, urgence, localisation, priorité, dossier
+  const groupes = [
+    {
+      key: 'revenus',
+      titre: 'Revenus / Taux d effort',
+      max: 20,
+      val: sc.taux || 0,
+      color: C.accent,
+      details: [
+        { label: 'Revenus declares', val: (dem.rev || 0) + ' EUR/mois' },
+        { label: 'Loyer du logement', val: (logement && logement.loyer || 0) + ' EUR' },
+        { label: 'Taux d effort', val: res.te + '%', highlight: true },
+        { label: 'Bareme', val: 'TE <= 25% : 20 pts - TE <= 30% : 16 pts - TE <= 35% : 10 pts - sinon 5 pts' }
+      ]
+    },
+    {
+      key: 'famille',
+      titre: 'Composition familiale',
+      max: 15,
+      val: sc.comp || 0,
+      color: C.purple,
+      details: [
+        { label: 'Adultes', val: dem.adultes || 0 },
+        { label: 'Enfants', val: dem.enfants || 0 },
+        { label: 'Typologie souhaitee', val: dem.typ_v || '-' },
+        { label: 'Typologie logement', val: (logement && logement.typ) || '-', highlight: true },
+        { label: 'Bareme', val: 'Adequation famille/typologie : 15 / 10 / 5 pts' }
+      ]
+    },
+    {
+      key: 'typologie',
+      titre: 'Typologie',
+      max: 20,
+      val: sc.typ || 0,
+      color: C.navy,
+      details: [
+        { label: 'Souhait candidat', val: dem.typ_v || '-' },
+        { label: 'Typologie logement', val: (logement && logement.typ) || '-', highlight: true },
+        { label: 'Match exact', val: dem.typ_v === (logement && logement.typ) ? 'Oui (+20)' : 'Non - dans plage (+15)' }
+      ]
+    },
+    {
+      key: 'anciennete',
+      titre: 'Anciennete',
+      max: 10,
+      val: sc.anc || 0,
+      color: C.amber,
+      details: [
+        { label: 'Anciennete demande', val: (dem.anc || 0) + ' mois', highlight: true },
+        { label: 'Bareme', val: '>=36m : 10 pts - >=24m : 8 pts - >=12m : 5 pts - >=6m : 3 pts - sinon 1 pt' }
+      ]
+    },
+    {
+      key: 'urgence',
+      titre: 'Urgence sociale',
+      max: 15,
+      val: sc.urg || 0,
+      color: C.red,
+      details: [
+        dem.sans_log && { label: 'Sans logement', val: '+6 pts' },
+        dem.violences && { label: 'Violences intrafamiliales', val: '+5 pts' },
+        dem.handicap && { label: 'Handicap', val: '+4 pts' },
+        dem.expulsion && { label: 'Procedure expulsion', val: '+5 pts' },
+        dem.suroc && { label: 'Sur-occupation', val: '+4 pts' },
+        dem.grossesse && { label: 'Grossesse', val: '+3 pts' },
+        dem.urgence && { label: 'Urgence declaree', val: '+3 pts' },
+        { label: 'Plafond', val: '15 pts max' }
+      ].filter(Boolean)
+    },
+    {
+      key: 'localisation',
+      titre: 'Localisation',
+      max: 10,
+      val: sc.loc || 0,
+      color: C.green,
+      details: [
+        { label: 'Quartiers souhaites', val: (dem.quartiers || []).join(', ') || '-' },
+        { label: 'Secteurs souhaites', val: (dem.secteurs || []).join(', ') || '-' },
+        { label: 'Quartier logement', val: (logement && logement.quartier) || '-', highlight: true },
+        { label: 'Secteur logement', val: (logement && logement.secteur) || '-' },
+        { label: 'Bareme', val: 'Quartier souhaite : 10 pts - Secteur souhaite : 8 pts - autre : 2 pts' }
+      ]
+    },
+    {
+      key: 'priorite',
+      titre: 'Priorite reglementaire',
+      max: 5,
+      val: sc.prio || 0,
+      color: C.red,
+      details: [
+        dem.dalo && { label: 'DALO reconnu', val: '+5 pts' },
+        dem.prio_expulsion && { label: 'Priorite expulsion', val: '+5 pts' },
+        dem.mutation && { label: 'Mutation', val: '+3 pts' },
+        dem.prio_handicap && { label: 'Priorite handicap', val: '+3 pts' },
+        !(dem.dalo || dem.prio_expulsion || dem.mutation || dem.prio_handicap) && { label: 'Aucune priorite', val: '0 pt' }
+      ].filter(Boolean)
+    },
+    {
+      key: 'dossier',
+      titre: 'Dossier',
+      max: 5,
+      val: sc.dos || 0,
+      color: C.accent,
+      details: [
+        { label: 'Pieces completes', val: dem.pieces ? 'Oui (+5)' : 'Non (+1)', highlight: true }
+      ]
+    }
+  ]
+
+  const totalBase = res.base || 0
+  const bonusTotal = bm.filter(b => b.type === 'bonus').reduce((a, b) => a + (parseInt((b.msg.match(/\+(\d+)/) || [])[1]) || 0), 0)
+  const malusTotal = bm.filter(b => b.type === 'malus').reduce((a, b) => a + (parseInt((b.msg.match(/-(\d+)/) || [])[1]) || 0), 0)
+
+  return (
+    <Modal title={'Detail du score - ' + dem.nom + ' ' + dem.prenom} onClose={onClose} maxW={720}>
+      {/* Résumé en tête */}
+      <div style={{ background: C.navy, borderRadius: 10, padding: 16, marginBottom: 18, display: 'flex', alignItems: 'center', gap: 16 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ color: C.light, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.07em', fontWeight: 700 }}>Score total</div>
+          <div style={{ color: '#fff', fontSize: 34, fontWeight: 800, fontFamily: Fh, lineHeight: 1 }}>{res.total}<span style={{ fontSize: 16, color: C.light }}> / 100</span></div>
+          <div style={{ color: C.light, fontSize: 11, marginTop: 4 }}>Base {totalBase} + bonus {bonusTotal} - malus {malusTotal}</div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ color: C.light, fontSize: 11 }}>Taux effort</div>
+          <div style={{ color: '#fff', fontSize: 22, fontWeight: 800, fontFamily: Fh }}>{res.te}%</div>
+        </div>
+      </div>
+
+      {/* Groupes de critères */}
+      {groupes.map(g => {
+        const pct = g.max > 0 ? (g.val / g.max) * 100 : 0
+        return (
+          <div key={g.key} style={{ marginBottom: 14, padding: 12, border: '1px solid ' + C.border, borderRadius: 8, background: C.bg }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ fontFamily: Fh, fontWeight: 800, fontSize: 13, color: C.text }}>{g.titre}</div>
+              <div style={{ fontFamily: Fh, fontWeight: 800, fontSize: 15, color: g.color }}>{g.val} / {g.max}</div>
+            </div>
+            <div style={{ height: 6, background: '#E4E9F2', borderRadius: 3, overflow: 'hidden', marginBottom: 10 }}>
+              <div style={{ width: pct + '%', height: '100%', background: g.color, transition: 'width 0.3s' }} />
+            </div>
+            {g.details.length > 0 && (
+              <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.6 }}>
+                {g.details.map((d, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', borderBottom: i < g.details.length - 1 ? '1px dashed ' + C.border : 'none', padding: '3px 0' }}>
+                    <span>{d.label}</span>
+                    <span style={{ fontWeight: d.highlight ? 700 : 500, color: d.highlight ? C.text : C.muted, textAlign: 'right' }}>{d.val}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      {/* Bonus / malus historiques */}
+      {bm.length > 0 && (
+        <div style={{ marginBottom: 14, padding: 12, border: '1px solid ' + C.border, borderRadius: 8, background: '#FFF7E5' }}>
+          <div style={{ fontFamily: Fh, fontWeight: 800, fontSize: 13, color: C.text, marginBottom: 8 }}>Historique (bonus / malus)</div>
+          <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+            {bm.map((b, i) => (
+              <div key={i} style={{ color: b.type === 'bonus' ? C.green : C.red, fontWeight: 600 }}>
+                {b.type === 'bonus' ? '▲' : '▼'} {b.msg}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 11, color: C.muted, marginTop: 14, padding: 10, background: C.bg, borderRadius: 6, lineHeight: 1.5 }}>
+        Ce detail est fourni a titre d information. Le score est calcule automatiquement par le moteur de matching
+        selon les criteres reglementaires CAL et les priorites locales de la Mairie de Saint-Denis (974).
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+        <button onClick={onClose} style={{ padding: '9px 20px', background: C.accent, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>
+          Fermer
+        </button>
+      </div>
+    </Modal>
   )
 }
 
@@ -1489,13 +1936,24 @@ const MOTIFS_REFUS = [
 
 const STATUTS_POST = ['En attente réponse candidat', 'Accepté', 'Refusé par candidat', 'Refusé par bailleur', 'Bail signé', 'Entrée dans les lieux', 'Sans suite']
 
-function CALPrepa({ dossiers }) {
+function CALPrepa({ dossiers, user }) {
   const [decisions, setDecisions] = useState({})
   const [postCAL, setPostCAL] = useState({})
   const [tab, setTab] = useState('commission')
   const [saving, setSaving] = useState({})
   const [saved, setSaved] = useState({})
+  const [pvSigning, setPvSigning] = useState(null)  // { decision, user } pour la modal
+  const [decisionsList, setDecisionsList] = useState([])
+  const [loadingDec, setLoadingDec] = useState(false)
   const toast = useToast()
+
+  const reloadDecisions = useCallback(async () => {
+    setLoadingDec(true)
+    try { setDecisionsList(await api('/decisions-cal')) }
+    catch (e) { console.error(e) }
+    finally { setLoadingDec(false) }
+  }, [])
+  useEffect(() => { if (tab === 'post') reloadDecisions() }, [tab, reloadDecisions])
 
   const dk = (d, c) => d.logement.id + '-' + c.dem.id
 
@@ -1556,6 +2014,97 @@ function CALPrepa({ dossiers }) {
           </button>
         ))}
       </div>
+
+      {tab === 'post' && (
+        <div style={{ background: C.card, borderRadius: 13, border: '1px solid ' + C.border, padding: 18 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+            <div>
+              <h2 style={{ fontFamily: Fh, fontSize: 15, fontWeight: 800, color: C.text, margin: 0 }}>Decisions CAL - signature & archivage</h2>
+              <p style={{ color: C.muted, fontSize: 12, margin: '4px 0 0' }}>Signature electronique PIN directeur + hash SHA-256 + horodatage</p>
+            </div>
+            <button onClick={reloadDecisions}
+              style={{ padding: '7px 14px', border: '1px solid ' + C.border, borderRadius: 7, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 11.5, fontWeight: 600, color: C.muted }}>
+              Recharger
+            </button>
+          </div>
+          {loadingDec && <Spin />}
+          {!loadingDec && decisionsList.length === 0 && (
+            <div style={{ textAlign: 'center', padding: 30, color: C.muted }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 6 }}>Aucune decision enregistree</div>
+              <div style={{ fontSize: 12 }}>Validez d abord une commission pour generer un PV.</div>
+            </div>
+          )}
+          {!loadingDec && decisionsList.length > 0 && (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: C.bg }}>
+                    {['Date', 'Logement', 'Candidats', 'Signature', 'Actions'].map(h => (
+                      <th key={h} style={{ padding: '9px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid ' + C.border }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {decisionsList.map(dec => {
+                    const sig = dec.signature && dec.signature.signed
+                    return (
+                      <tr key={dec.id} style={{ borderBottom: '1px solid ' + C.border }}>
+                        <td style={{ padding: '9px 12px' }}>
+                          <div style={{ fontWeight: 700, color: C.text }}>{dec.date_cal || dec.date || '-'}</div>
+                          <div style={{ fontSize: 10, color: C.muted }}>{dec.id}</div>
+                        </td>
+                        <td style={{ padding: '9px 12px' }}>
+                          <div style={{ fontWeight: 600, color: C.text }}>{dec.logement_ref || '-'}</div>
+                          <div style={{ fontSize: 10, color: C.muted }}>{dec.logement_adresse || ''}</div>
+                        </td>
+                        <td style={{ padding: '9px 12px', color: C.text }}>{(dec.candidats || []).length} candidat(s)</td>
+                        <td style={{ padding: '9px 12px' }}>
+                          {sig ? (
+                            <>
+                              <Pill label="Signe" color={C.green} bg="#DCFCE7" />
+                              <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>
+                                par {dec.signature.signed_by_name}<br />
+                                {new Date(dec.signature.signed_at).toLocaleString('fr-FR')}
+                              </div>
+                              <div style={{ fontSize: 9, color: C.muted, fontFamily: 'monospace', marginTop: 2 }} title={dec.signature.content_hash}>
+                                hash: {(dec.signature.content_hash || '').substring(0, 16)}...
+                              </div>
+                            </>
+                          ) : (
+                            <Pill label="Non signe" color={C.amber} bg={C.amberBg} />
+                          )}
+                        </td>
+                        <td style={{ padding: '9px 12px' }}>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button onClick={() => window.open('/api/cal/pv/' + dec.id, '_blank')}
+                              style={{ padding: '5px 10px', border: '1px solid ' + C.border, borderRadius: 6, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 11, fontWeight: 600, color: C.muted }}>
+                              Voir PV
+                            </button>
+                            {!sig && user && user.role === 'directeur' && (
+                              <button onClick={() => setPvSigning(dec)}
+                                style={{ padding: '5px 10px', border: 'none', borderRadius: 6, background: C.accent, cursor: 'pointer', fontFamily: Fh, fontSize: 11, fontWeight: 700, color: '#fff' }}>
+                                Signer
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {pvSigning && (
+        <SignaturePVModal
+          decision={pvSigning}
+          onClose={() => setPvSigning(null)}
+          onSigned={() => { setPvSigning(null); reloadDecisions(); toast('PV signe avec succes', 'success') }}
+        />
+      )}
 
       {tab === 'commission' && dossiers.map(d => (
         <div key={d.logement.id} style={{ background: C.card, borderRadius: 13, border: '1px solid ' + C.border, marginBottom: 24, overflow: 'hidden' }}>
@@ -1637,6 +2186,158 @@ function CALPrepa({ dossiers }) {
         </div>
       ))}
     </div>
+  )
+}
+
+// ===========================================================
+// SIGNATURE PV CAL - MODAL PIN DIRECTEUR
+// ===========================================================
+
+function SignaturePVModal({ decision, onClose, onSigned }) {
+  const [pin, setPin] = useState('')
+  const [signing, setSigning] = useState(false)
+  const [error, setError] = useState('')
+  const [result, setResult] = useState(null)
+  const [needsSetup, setNeedsSetup] = useState(false)
+  const [setupPwd, setSetupPwd] = useState('')
+  const [setupPin, setSetupPin] = useState('')
+  const [setupPin2, setSetupPin2] = useState('')
+  const [setupBusy, setSetupBusy] = useState(false)
+
+  const submit = async () => {
+    if (!pin || pin.length < 4) { setError('PIN requis (4 chiffres minimum)'); return }
+    setError('')
+    setSigning(true)
+    try {
+      const r = await api('/cal/pv/' + decision.id + '/signer', {
+        method: 'POST',
+        body: { pin }
+      })
+      setResult(r.signature)
+      setTimeout(() => onSigned(), 3500)
+    } catch (e) {
+      const msg = e.message || 'Erreur de signature'
+      if (/aucun pin configure/i.test(msg)) {
+        setNeedsSetup(true)
+      }
+      setError(msg)
+    } finally {
+      setSigning(false)
+    }
+  }
+
+  const definirPin = async () => {
+    if (!setupPwd) { setError('Mot de passe requis pour confirmer'); return }
+    if (!setupPin || !/^\d{4,8}$/.test(setupPin)) { setError('PIN invalide (4 a 8 chiffres)'); return }
+    if (setupPin !== setupPin2) { setError('Les deux PIN ne correspondent pas'); return }
+    setError('')
+    setSetupBusy(true)
+    try {
+      await api('/auth/set-pin', { method: 'POST', body: { pin: setupPin, password: setupPwd } })
+      setNeedsSetup(false)
+      setPin(setupPin)
+      setSetupPwd(''); setSetupPin(''); setSetupPin2('')
+      setError('')
+    } catch (e) {
+      setError(e.message || 'Erreur lors de la definition du PIN')
+    } finally {
+      setSetupBusy(false)
+    }
+  }
+
+  return (
+    <Modal title="Signature electronique du PV CAL" onClose={onClose} maxW={560}>
+      {!result ? (
+        <>
+          <div style={{ background: C.bg, borderRadius: 8, padding: 14, marginBottom: 16, fontSize: 12.5, color: C.text, lineHeight: 1.6 }}>
+            <b>PV concerne :</b> {decision.id}<br />
+            <b>Logement :</b> {decision.logement_ref || '-'} - {decision.logement_adresse || ''}<br />
+            <b>Date CAL :</b> {decision.date_cal || '-'}<br />
+            <b>Candidats examines :</b> {(decision.candidats || []).length}
+          </div>
+
+          <div style={{ background: '#FFF7E5', border: '1px solid ' + C.amber, borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 11.5, color: C.text, lineHeight: 1.5 }}>
+            <b style={{ color: C.amber }}>Attention :</b> la signature electronique est definitive.
+            Elle cree un hash SHA-256 du contenu de la decision + un horodatage + votre identite de directeur.
+            Toute modification ulterieure invalidera la signature.
+          </div>
+
+          {needsSetup && (
+            <div style={{ background: '#EEF6FF', border: '1px solid ' + C.accent, borderRadius: 8, padding: 14, marginBottom: 14 }}>
+              <div style={{ fontFamily: Fh, fontWeight: 800, fontSize: 13, color: C.accent, marginBottom: 8 }}>Definir votre PIN directeur</div>
+              <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>Premiere signature : choisissez un PIN (4 a 8 chiffres). Il sera stocke uniquement sur le serveur.</div>
+              <Field label="Votre mot de passe (confirmation)">
+                <input type="password" style={inp} value={setupPwd} onChange={e => setSetupPwd(e.target.value)} placeholder="Mot de passe" />
+              </Field>
+              <Field label="Nouveau PIN">
+                <input type="password" inputMode="numeric" maxLength={8} style={{ ...inp, letterSpacing: '0.2em', textAlign: 'center' }} value={setupPin} onChange={e => setSetupPin(e.target.value.replace(/\D/g, ''))} placeholder="****" />
+              </Field>
+              <Field label="Confirmer le PIN">
+                <input type="password" inputMode="numeric" maxLength={8} style={{ ...inp, letterSpacing: '0.2em', textAlign: 'center' }} value={setupPin2} onChange={e => setSetupPin2(e.target.value.replace(/\D/g, ''))} placeholder="****" />
+              </Field>
+              <button onClick={definirPin} disabled={setupBusy}
+                style={{ width: '100%', padding: '9px', border: 'none', borderRadius: 7, background: C.accent, color: '#fff', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>
+                {setupBusy ? 'Enregistrement...' : 'Enregistrer mon PIN'}
+              </button>
+            </div>
+          )}
+
+          {!needsSetup && (
+            <Field label="Votre PIN directeur">
+              <input
+                type="password"
+                inputMode="numeric"
+                autoFocus
+                maxLength={8}
+                style={{ ...inp, fontSize: 18, letterSpacing: '0.3em', textAlign: 'center', fontFamily: 'monospace' }}
+                value={pin}
+                onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
+                onKeyDown={e => e.key === 'Enter' && submit()}
+                placeholder="****"
+              />
+            </Field>
+          )}
+
+          {error && (
+            <div style={{ background: C.redBg, color: C.red, padding: 10, borderRadius: 6, fontSize: 12, fontWeight: 600, marginBottom: 12 }}>
+              {error}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 16 }}>
+            <button onClick={onClose} disabled={signing}
+              style={{ padding: '9px 16px', border: '1px solid ' + C.border, borderRadius: 8, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 600, color: C.muted }}>
+              Annuler
+            </button>
+            <button onClick={submit} disabled={signing || !pin}
+              style={{ padding: '9px 20px', background: signing ? C.muted : C.accent, color: '#fff', border: 'none', borderRadius: 8, cursor: signing || !pin ? 'not-allowed' : 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700, opacity: !pin ? 0.5 : 1 }}>
+              {signing ? 'Signature...' : 'Signer electroniquement'}
+            </button>
+          </div>
+        </>
+      ) : (
+        <div>
+          <div style={{ background: '#DCFCE7', border: '2px solid ' + C.green, borderRadius: 10, padding: 16, marginBottom: 14, textAlign: 'center' }}>
+            <div style={{ fontSize: 22, fontFamily: Fh, fontWeight: 800, color: C.green, marginBottom: 6 }}>PV signe avec succes</div>
+            <div style={{ fontSize: 12, color: C.text }}>
+              Par {result.signed_by_name} le {new Date(result.signed_at).toLocaleString('fr-FR')}
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 6, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Hash du contenu (SHA-256)</div>
+          <code style={{ display: 'block', background: C.bg, padding: 10, borderRadius: 6, fontSize: 10.5, wordBreak: 'break-all', color: C.text, marginBottom: 12 }}>
+            {result.content_hash}
+          </code>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 6, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Signature electronique</div>
+          <code style={{ display: 'block', background: C.bg, padding: 10, borderRadius: 6, fontSize: 10.5, wordBreak: 'break-all', color: C.text, marginBottom: 12 }}>
+            {result.signature_hash}
+          </code>
+          <button onClick={() => window.open('/api/cal/pv/' + decision.id, '_blank')}
+            style={{ width: '100%', padding: '10px', background: C.accent, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>
+            Ouvrir le PV signe
+          </button>
+        </div>
+      )}
+    </Modal>
   )
 }
 
@@ -2111,6 +2812,41 @@ function Stats() {
 
 function RapportMensuel() {
   const { data: rapport, loading, reload } = useApi('/rapport-mensuel')
+  const [archives, setArchives] = useState([])
+  const [archivesLoaded, setArchivesLoaded] = useState(false)
+  const [moisChoisi, setMoisChoisi] = useState(() => {
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1)
+    return d.toISOString().substring(0, 7)
+  })
+  const [gen, setGen] = useState(false)
+  const [sending, setSending] = useState(false)
+  const toast = useToast()
+
+  const reloadArchives = useCallback(async () => {
+    try { setArchives(await api('/rapports')); setArchivesLoaded(true) }
+    catch (e) { console.error(e) }
+  }, [])
+  useEffect(() => { reloadArchives() }, [reloadArchives])
+
+  const genererArchive = async (force = false) => {
+    setGen(true)
+    try {
+      await api('/rapports/generer-mensuel', { method: 'POST', body: { mois: moisChoisi, force } })
+      toast('Rapport ' + moisChoisi + (force ? ' regenere' : ' genere et archive'), 'success')
+      reloadArchives()
+    } catch (e) { toast('Erreur: ' + e.message, 'error') }
+    finally { setGen(false) }
+  }
+
+  const envoyerTelegram = async (mois) => {
+    setSending(true)
+    try {
+      const r = await api('/rapports/' + mois + '/envoyer-telegram', { method: 'POST', body: {} })
+      toast('Rapport envoye a ' + r.envoyes + '/' + r.total + ' destinataires Telegram', 'success')
+    } catch (e) { toast('Erreur Telegram: ' + e.message, 'error') }
+    finally { setSending(false) }
+  }
+
   if (loading) return <Spin />
   if (!rapport) return null
   const maxTyp = Math.max(1, ...Object.values(rapport.par_typ || {}))
@@ -2124,6 +2860,67 @@ function RapportMensuel() {
         </div>
         <button onClick={() => reload()} style={{ padding: '9px 16px', border: '1px solid ' + C.border, borderRadius: 8, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 600, color: C.muted }}>Actualiser</button>
       </div>
+
+      {/* Archives mensuelles + Telegram */}
+      <div style={{ background: C.card, borderRadius: 12, border: '1px solid ' + C.border, padding: 18, marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
+          <div>
+            <div style={{ fontFamily: Fh, fontSize: 14, fontWeight: 800, color: C.text }}>Archives mensuelles</div>
+            <div style={{ fontSize: 11.5, color: C.muted, marginTop: 2 }}>Rapport fige + envoi Telegram aux agents et directeur</div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input type="month" value={moisChoisi} onChange={e => setMoisChoisi(e.target.value)}
+              style={{ padding: '7px 10px', borderRadius: 7, border: '1px solid ' + C.border, fontSize: 12, fontFamily: Fb, color: C.text }} />
+            <button onClick={() => genererArchive(false)} disabled={gen}
+              style={{ padding: '7px 14px', border: 'none', borderRadius: 7, background: C.accent, color: '#fff', cursor: 'pointer', fontFamily: Fh, fontSize: 11.5, fontWeight: 700 }}>
+              {gen ? 'Generation...' : 'Generer & archiver'}
+            </button>
+            <button onClick={() => genererArchive(true)} disabled={gen}
+              style={{ padding: '7px 14px', border: '1px solid ' + C.amber, borderRadius: 7, background: 'transparent', color: C.amber, cursor: 'pointer', fontFamily: Fh, fontSize: 11.5, fontWeight: 700 }}>
+              Regenerer (force)
+            </button>
+          </div>
+        </div>
+        {!archivesLoaded ? <Spin /> : archives.length === 0 ? (
+          <div style={{ padding: 18, textAlign: 'center', color: C.muted, fontSize: 12.5 }}>
+            Aucune archive. Choisissez un mois et cliquez sur "Generer & archiver" pour creer le premier rapport fige.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: C.bg }}>
+                  {['Mois', 'Taille', 'Genere le', 'Actions'].map(h => (
+                    <th key={h} style={{ padding: '8px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid ' + C.border }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {archives.map(a => (
+                  <tr key={a.mois} style={{ borderBottom: '1px solid ' + C.border }}>
+                    <td style={{ padding: '8px 12px', fontWeight: 700, color: C.text, fontFamily: Fh }}>{a.mois}</td>
+                    <td style={{ padding: '8px 12px', color: C.muted }}>{Math.round(a.size / 1024)} Ko</td>
+                    <td style={{ padding: '8px 12px', color: C.muted, fontSize: 11 }}>{new Date(a.mtime).toLocaleString('fr-FR')}</td>
+                    <td style={{ padding: '8px 12px' }}>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button onClick={() => window.open('/api/rapports/' + a.mois + '/html', '_blank')}
+                          style={{ padding: '5px 10px', border: '1px solid ' + C.border, borderRadius: 6, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 11, fontWeight: 600, color: C.muted }}>
+                          Voir / PDF
+                        </button>
+                        <button onClick={() => envoyerTelegram(a.mois)} disabled={sending}
+                          style={{ padding: '5px 10px', border: 'none', borderRadius: 6, background: C.purple, color: '#fff', cursor: 'pointer', fontFamily: Fh, fontSize: 11, fontWeight: 700 }}>
+                          {sending ? '...' : 'Envoyer Telegram'}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
         {[
           { l: 'Demandeurs actifs', v: rapport.nb_demandeurs_actifs, c: C.accent },
@@ -2256,10 +3053,10 @@ function PortailCandidatPage() {
   }
 
   const ETAPES = [
-    { n: 1, label: 'Demande enregistree' },
-    { n: 2, label: 'Suivi actif' },
-    { n: 3, label: 'Proposition attendue' },
-    { n: 4, label: 'Attribution' }
+    { n: 1, label: 'Reçu' },
+    { n: 2, label: 'En étude' },
+    { n: 3, label: 'En CAL' },
+    { n: 4, label: 'Attribué' }
   ]
 
   return (
@@ -2268,7 +3065,7 @@ function PortailCandidatPage() {
         <div style={{ width: 40, height: 40, background: 'linear-gradient(135deg, #E05C2A 0%, #F68144 100%)', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 900, color: '#fff', fontFamily: Fh, boxShadow: '0 6px 16px rgba(224,92,42,0.3)' }}>L</div>
         <div>
           <div style={{ color: '#fff', fontWeight: 800, fontSize: 16, fontFamily: Fh }}>Logivia</div>
-          <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 10 }}>Suivi de dossier · Ville de Saint-Denis</div>
+          <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 10 }}>Suivi de dossier · Mairie de Saint-Denis (974)</div>
         </div>
       </div>
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
@@ -2368,7 +3165,7 @@ function PortailCandidatPage() {
         </div>
       </div>
       <div style={{ padding: '14px 30px', borderTop: '1px solid rgba(255,255,255,0.06)', textAlign: 'center', color: 'rgba(255,255,255,0.2)', fontSize: 11 }}>
-        Logivia · Ville de Saint-Denis · Données sécurisées · RGPD
+        Logivia · Mairie de Saint-Denis (974) · Données sécurisées · RGPD
       </div>
     </div>
   )
@@ -2642,7 +3439,7 @@ function AppInner() {
           {active === 'logements' && <div style={{ flex: 1, overflowY: 'auto' }}><Logements goMatch={goMatch} /></div>}
           {active === 'demandeurs' && <Demandeurs />}
           {active === 'matching' && <Matching initLog={matchLog} addToCAL={addToCAL} />}
-          {active === 'cal' && <div style={{ flex: 1, overflowY: 'auto' }}><CALPrepa dossiers={calDossiers} /></div>}
+          {active === 'cal' && <div style={{ flex: 1, overflowY: 'auto' }}><CALPrepa dossiers={calDossiers} user={user} /></div>}
           {active === 'audiences' && <div style={{ flex: 1, overflowY: 'auto' }}><AudiencesElus /></div>}
           {active === 'elus' && <div style={{ flex: 1, overflowY: 'auto' }}><GestionElus /></div>}
           {active === 'stats' && <div style={{ flex: 1, overflowY: 'auto' }}><Stats /></div>}

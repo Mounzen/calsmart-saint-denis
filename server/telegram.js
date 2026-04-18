@@ -12,7 +12,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const DATA = join(__dirname, 'data')
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '8365732100:AAHhqqnayRjBSQMIpyy3YHxZh6fYnMPexI0'
+const BOT_USERNAME = process.env.BOT_USERNAME || 'CALSmartSaintDenis_bot'
 const API_URL = `https://api.telegram.org/bot${BOT_TOKEN}`
+
+// ─── LIENS DE CONNEXION PERSONNELS ───────────────────────────────────────────
+// Format: https://t.me/<bot>?start=elu_<id> ou dem_<id>
+// Quand l utilisateur clique le lien, Telegram ouvre le bot et envoie
+// automatiquement /start elu_<id>, ce qui declenche saveChatId() via webhook.
+
+export function genererLienElu(eluId) {
+  return `https://t.me/${BOT_USERNAME}?start=elu_${eluId}`
+}
+
+export function genererLienCandidat(demId) {
+  return `https://t.me/${BOT_USERNAME}?start=dem_${demId}`
+}
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -349,11 +363,4 @@ export async function notifierDecisionCAL(demId, dem, decision, logement) {
   return sendMessage(chatId, MSG.decision_cal(dem, decision, logement))
 }
 
-// ─── GÉNÉRER LIEN DE CONNEXION ────────────────────────────────────────────────
-export function genererLienElu(eluId) {
-  return `https://t.me/CALSmartSaintDenis_bot?start=elu_${eluId}`
-}
-
-export function genererLienCandidat(demId) {
-  return `https://t.me/CALSmartSaintDenis_bot?start=dem_${demId}`
-}
+// ─── GÉNÉRER LIEN DE CONNEXION ─────

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef, createContext, useContext } from 'react'
 import Statistiques from './Statistiques.jsx'
 import ImportPelehas from './ImportPelehas.jsx'
-import { AuthProvider, useAuth, LoginScreen, ChangePasswordModal, GestionUtilisateurs, LogsActions, apiFetch } from './Auth.jsx'
+import { AuthProvider, AuthContext, useAuth, LoginScreen, ChangePasswordModal, GestionUtilisateurs, LogsActions, apiFetch } from './Auth.jsx'
 import TelegramPanel from './Telegram.jsx'
 import {
   EditWithMotifModal,
@@ -166,7 +166,9 @@ function AuthProviderLocal({ children }) {
 
   return (
     <AuthCtx.Provider value={{ user, login, logout }}>
-      {children}
+      <AuthContext.Provider value={{ user, login, logout, loading }}>
+        {children}
+      </AuthContext.Provider>
     </AuthCtx.Provider>
   )
 }
@@ -1833,10 +1835,10 @@ function GestionElus() {
   const [editElu, setEditElu] = useState(null)
   const [saving, setSaving] = useState(false)
   const [ficheElu, setFicheElu] = useState(null)
-
-  if (ficheElu) return <FicheEluPage elu_id={ficheElu} onBack={() => setFicheElu(null)} />
   const blank = { nom: '', prenom: '', secteur: '', quartiers: [], email: '', telephone: '' }
   const [form, setForm] = useState(blank)
+
+  if (ficheElu) return <FicheEluPage elu_id={ficheElu} onBack={() => setFicheElu(null)} />
 
   const openEdit = (elu) => {
     setEditElu(elu)

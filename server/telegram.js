@@ -9,7 +9,8 @@ import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const DATA = join(__dirname, 'data')
+// DATA = volume persistant (Railway) si DATA_DIR defini, sinon server/data
+const DATA = process.env.DATA_DIR || join(__dirname, 'data')
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '8365732100:AAHhqqnayRjBSQMIpyy3YHxZh6fYnMPexI0'
 const BOT_USERNAME = process.env.BOT_USERNAME || 'CALSmartSaintDenis_bot'

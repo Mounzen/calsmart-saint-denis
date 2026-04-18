@@ -3032,25 +3032,30 @@ function RapportMensuel() {
 // ===========================================================
 
 function PortailCandidatPage() {
-  const [nud, setNud] = useState('')
-  const [result, setResult] = useState(null)
+  const [token, setToken] = useState('')
+  const [needDobSetup, setNeedDobSetup] = useState(false)
+  const [dossier, setDossier] = useState(null)
+  const [piecesData, setPiecesData] = useState({ pieces_attendues: [], pieces_deposees: [], pieces_manquantes: [] })
+  const [propositions, setPropositions] = useState([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
+  const [tab, setTab] = useState('suivi')
+  const [flash, setFlash] = useState('')
 
-  const search = async (e) => {
-    if (e) e.preventDefault()
-    if (!nud.trim()) return
-    setLoading(true)
-    setErr('')
-    setResult(null)
-    try {
-      const r = await fetch('/api/portail/dossier/' + encodeURIComponent(nud.trim()))
-      const d = await r.json()
-      if (!r.ok) { setErr(d.error || 'Dossier introuvable'); return }
-      setResult(d)
-    } catch (e) { setErr('Erreur de connexion') }
-    finally { setLoading(false) }
-  }
+  // Auth form state
+  const [nud, setNud] = useState('')
+  const [dob, setDob] = useState('')
+
+  // DOB setup state
+  const [dobSetup, setDobSetup] = useState('')
+
+  // Piece upload state
+  const [pieceCode, setPieceCode] = useState('')
+  const [pieceFile, setPieceFile] = useState(null)
+  const [uploading, setUploading] = useState(false)
+
+  // Proposition action state
+  const [propMotif, setPropMotif] = useState({})
 
   const ETAPES = [
     { n: 1, label: 'Reçu' },
@@ -3059,109 +3064,485 @@ function PortailCandidatPage() {
     { n: 4, label: 'Attribué' }
   ]
 
+  const authHeaders = () => ({ 'x-portail-token': token, 'Content-Type': 'application/json' })
+
+  const showFlash = (msg) => { setFlash(msg); setTimeout(() => setFlash(''), 3500) }
+
+  const login = async (e) => {
+    if (e) e.preventDefault()
+    if (!nud.trim() || !dob.trim()) return
+    setLoading(true); setErr('')
+    try {
+      const r = await fetch('/api/portail/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nud: nud.trim(), date_naissance: dob })
+      })
+      const d = await r.json()
+      if (!r.ok) { setErr(d.error || 'Identifiants incorrects'); return }
+      setToken(d.token)
+      setNeedDobSetup(!!d.need_dob_setup)
+      if (!d.need_dob_setup) await loadDossier(d.token)
+    } catch { setErr('Erreur de connexion') }
+    finally { setLoading(false) }
+  }
+
+  const loadDossier = async (tk) => {
+    const t = tk || token
+    const hdr = { 'x-portail-token': t }
+    try {
+      const [rD, rP, rProp] = await Promise.all([
+        fetch('/api/portail/dossier', { headers: hdr }),
+        fetch('/api/portail/pieces', { headers: hdr }),
+        fetch('/api/portail/propositions', { headers: hdr })
+      ])
+      const dD = await rD.json()
+      if (!rD.ok) { setErr(dD.error || 'Session expirée'); setToken(''); return }
+      setDossier(dD)
+      if (rP.ok) setPiecesData(await rP.json())
+      if (rProp.ok) setPropositions(await rProp.json())
+    } catch { setErr('Erreur de connexion') }
+  }
+
+  const saveDob = async (e) => {
+    if (e) e.preventDefault()
+    if (!dobSetup) return
+    setLoading(true); setErr('')
+    try {
+      const r = await fetch('/api/portail/date-naissance', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ date_naissance: dobSetup })
+      })
+      const d = await r.json()
+      if (!r.ok) { setErr(d.error || 'Erreur'); return }
+      setNeedDobSetup(false)
+      showFlash('Date de naissance enregistrée')
+      await loadDossier()
+    } catch { setErr('Erreur de connexion') }
+    finally { setLoading(false) }
+  }
+
+  const logout = () => {
+    setToken(''); setDossier(null); setPiecesData({ pieces_attendues: [], pieces_deposees: [], pieces_manquantes: [] }); setPropositions([]); setNud(''); setDob(''); setNeedDobSetup(false); setErr(''); setTab('suivi')
+  }
+
+  const fileToBase64 = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const res = reader.result
+      const b64 = typeof res === 'string' ? res.split(',')[1] : ''
+      resolve(b64)
+    }
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+
+  const uploadPiece = async (e) => {
+    if (e) e.preventDefault()
+    if (!pieceCode || !pieceFile) return
+    if (pieceFile.size > 8 * 1024 * 1024) { showFlash('Fichier trop volumineux (max 8 Mo)'); return }
+    setUploading(true)
+    try {
+      const b64 = await fileToBase64(pieceFile)
+      const r = await fetch('/api/portail/pieces/upload', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ code: pieceCode, filename: pieceFile.name, mimetype: pieceFile.type || 'application/octet-stream', contenu_base64: b64 })
+      })
+      const d = await r.json()
+      if (!r.ok) { showFlash(d.error || 'Erreur upload'); return }
+      showFlash('Pièce envoyée')
+      setPieceCode(''); setPieceFile(null)
+      await loadDossier()
+    } catch { showFlash('Erreur upload') }
+    finally { setUploading(false) }
+  }
+
+  const deletePiece = async (id) => {
+    if (!confirm('Supprimer cette pièce ?')) return
+    try {
+      const r = await fetch('/api/portail/pieces/' + id, { method: 'DELETE', headers: authHeaders() })
+      const d = await r.json()
+      if (!r.ok) { showFlash(d.error || 'Erreur'); return }
+      showFlash('Pièce supprimée')
+      await loadDossier()
+    } catch { showFlash('Erreur') }
+  }
+
+  const repondreProposition = async (propId, reponse) => {
+    const motif = propMotif[propId] || ''
+    if (reponse === 'refusee' && !motif.trim()) { showFlash('Motif obligatoire pour refuser'); return }
+    if (!confirm(reponse === 'acceptee' ? 'Confirmer l\'acceptation ?' : 'Confirmer le refus ?')) return
+    try {
+      const r = await fetch('/api/portail/proposition/' + propId + '/repondre', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ reponse, motif })
+      })
+      const d = await r.json()
+      if (!r.ok) { showFlash(d.error || 'Erreur'); return }
+      showFlash(reponse === 'acceptee' ? 'Proposition acceptée' : 'Proposition refusée')
+      await loadDossier()
+    } catch { showFlash('Erreur') }
+  }
+
+  const renouveler = async () => {
+    if (!confirm('Confirmer le renouvellement annuel de votre demande ?')) return
+    try {
+      const r = await fetch('/api/portail/renouveler', { method: 'POST', headers: authHeaders() })
+      const d = await r.json()
+      if (!r.ok) { showFlash(d.error || 'Erreur'); return }
+      showFlash('Demande renouvelée')
+      await loadDossier()
+    } catch { showFlash('Erreur') }
+  }
+
+  const telechargerAttestation = () => {
+    const url = '/api/portail/attestation?token=' + encodeURIComponent(token)
+    window.open(url, '_blank')
+  }
+
+  const telechargerPiece = (id) => {
+    const url = '/api/portail/pieces/' + id + '/fichier?token=' + encodeURIComponent(token)
+    window.open(url, '_blank')
+  }
+
+  const PIECE_STATUT_COLOR = { en_attente: '#D97706', validee: '#10B981', refusee: '#DC2626' }
+  const PIECE_STATUT_LABEL = { en_attente: 'En attente', validee: 'Validée', refusee: 'Refusée' }
+
+  const card = { background: 'rgba(255,255,255,0.06)', borderRadius: 14, padding: '18px 22px', border: '1px solid rgba(255,255,255,0.12)', marginBottom: 16 }
+  const cardTitle = { fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 14 }
+  const tabBtn = (active) => ({ padding: '9px 14px', borderRadius: 9, border: '1px solid ' + (active ? C.accent : 'rgba(255,255,255,0.15)'), background: active ? C.accent : 'transparent', color: active ? '#fff' : 'rgba(255,255,255,0.65)', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap' })
+
   return (
     <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg,#0B1E3D 0%,#1D3557 100%)', display: 'flex', flexDirection: 'column', fontFamily: Fb }}>
       <div style={{ padding: '22px 30px', display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
         <div style={{ width: 40, height: 40, background: 'linear-gradient(135deg, #E05C2A 0%, #F68144 100%)', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 900, color: '#fff', fontFamily: Fh, boxShadow: '0 6px 16px rgba(224,92,42,0.3)' }}>L</div>
-        <div>
+        <div style={{ flex: 1 }}>
           <div style={{ color: '#fff', fontWeight: 800, fontSize: 16, fontFamily: Fh }}>Logivia</div>
-          <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 10 }}>Suivi de dossier · Mairie de Saint-Denis (974)</div>
+          <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 10 }}>Espace candidat · Mairie de Saint-Denis (974)</div>
         </div>
+        {token && dossier && (
+          <button onClick={logout} style={{ padding: '8px 14px', background: 'rgba(255,255,255,0.1)', color: '#fff', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 9, cursor: 'pointer', fontSize: 12, fontWeight: 700, fontFamily: Fh }}>Déconnexion</button>
+        )}
       </div>
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-        <div style={{ width: '100%', maxWidth: 560 }}>
-          {!result ? (
+
+      {flash && (
+        <div style={{ position: 'fixed', top: 20, right: 20, zIndex: 1000, padding: '12px 18px', background: 'rgba(16,185,129,0.95)', color: '#fff', borderRadius: 10, fontSize: 13, fontWeight: 600, boxShadow: '0 8px 24px rgba(0,0,0,0.3)' }}>{flash}</div>
+      )}
+
+      <div style={{ flex: 1, display: 'flex', alignItems: token && dossier ? 'flex-start' : 'center', justifyContent: 'center', padding: 24 }}>
+        <div style={{ width: '100%', maxWidth: 720 }}>
+
+          {!token && (
             <>
               <div style={{ textAlign: 'center', marginBottom: 36 }}>
-                <h1 style={{ color: '#fff', fontFamily: Fh, fontSize: 24, fontWeight: 800, margin: '0 0 10px', letterSpacing: '-0.03em' }}>Suivi de votre dossier</h1>
+                <h1 style={{ color: '#fff', fontFamily: Fh, fontSize: 24, fontWeight: 800, margin: '0 0 10px', letterSpacing: '-0.03em' }}>Accédez à votre dossier</h1>
                 <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13.5, lineHeight: 1.6, margin: 0 }}>
-                  Entrez votre numero unique de demande (NUD) pour consulter l avancement de votre dossier.
+                  Identification par votre NUD et date de naissance.
                 </p>
               </div>
-              <form onSubmit={search}>
+              <form onSubmit={login}>
                 <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 14, padding: 26, border: '1px solid rgba(255,255,255,0.1)' }}>
-                  <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
-                    Votre NUD
-                  </label>
+                  <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Votre NUD</label>
                   <input value={nud} onChange={e => setNud(e.target.value)} placeholder="ex: 93284-2021-00142"
-                    style={{ width: '100%', padding: '13px 15px', borderRadius: 10, border: '1.5px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.08)', color: '#fff', fontFamily: Fb, fontSize: 15, boxSizing: 'border-box', outline: 'none', letterSpacing: '0.04em' }} />
+                    style={{ width: '100%', padding: '12px 14px', borderRadius: 9, border: '1.5px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.08)', color: '#fff', fontFamily: Fb, fontSize: 14, boxSizing: 'border-box', outline: 'none', marginBottom: 14 }} />
+                  <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Date de naissance</label>
+                  <input type="date" value={dob} onChange={e => setDob(e.target.value)}
+                    style={{ width: '100%', padding: '12px 14px', borderRadius: 9, border: '1.5px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.08)', color: '#fff', fontFamily: Fb, fontSize: 14, boxSizing: 'border-box', outline: 'none' }} />
                   {err && <div style={{ marginTop: 12, padding: '10px 14px', background: 'rgba(220,38,38,0.15)', borderRadius: 8, border: '1px solid rgba(220,38,38,0.3)', fontSize: 13, color: '#FCA5A5' }}>{err}</div>}
-                  <button type="submit" disabled={loading || !nud.trim()}
-                    style={{ width: '100%', marginTop: 14, padding: '13px', borderRadius: 10, border: 'none', background: nud.trim() ? C.accent : 'rgba(255,255,255,0.1)', color: nud.trim() ? '#fff' : 'rgba(255,255,255,0.3)', cursor: nud.trim() ? 'pointer' : 'default', fontFamily: Fh, fontSize: 14, fontWeight: 700 }}>
-                    {loading ? 'Recherche...' : 'Consulter mon dossier'}
+                  <button type="submit" disabled={loading || !nud.trim() || !dob}
+                    style={{ width: '100%', marginTop: 16, padding: '13px', borderRadius: 10, border: 'none', background: (nud.trim() && dob) ? C.accent : 'rgba(255,255,255,0.1)', color: (nud.trim() && dob) ? '#fff' : 'rgba(255,255,255,0.3)', cursor: (nud.trim() && dob) ? 'pointer' : 'default', fontFamily: Fh, fontSize: 14, fontWeight: 700 }}>
+                    {loading ? 'Connexion...' : 'Accéder à mon dossier'}
                   </button>
                 </div>
               </form>
-              <div style={{ textAlign: 'center', marginTop: 20, color: 'rgba(255,255,255,0.2)', fontSize: 12, lineHeight: 1.8 }}>
-                Votre NUD figure sur l accusé d enregistrement de votre demande
+              <div style={{ textAlign: 'center', marginTop: 20, color: 'rgba(255,255,255,0.25)', fontSize: 12, lineHeight: 1.8 }}>
+                Si c'est votre première connexion et que nous n'avons pas votre date de naissance, un code vous sera demandé pour la renseigner.
               </div>
             </>
-          ) : (
+          )}
+
+          {token && needDobSetup && (
+            <>
+              <div style={{ textAlign: 'center', marginBottom: 28 }}>
+                <h1 style={{ color: '#fff', fontFamily: Fh, fontSize: 22, fontWeight: 800, margin: '0 0 8px' }}>Première connexion</h1>
+                <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13, margin: 0 }}>Confirmez votre date de naissance pour sécuriser votre espace.</p>
+              </div>
+              <form onSubmit={saveDob}>
+                <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 14, padding: 24, border: '1px solid rgba(255,255,255,0.1)' }}>
+                  <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Date de naissance</label>
+                  <input type="date" value={dobSetup} onChange={e => setDobSetup(e.target.value)} required
+                    style={{ width: '100%', padding: '12px 14px', borderRadius: 9, border: '1.5px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.08)', color: '#fff', fontFamily: Fb, fontSize: 14, boxSizing: 'border-box', outline: 'none' }} />
+                  {err && <div style={{ marginTop: 12, padding: '10px 14px', background: 'rgba(220,38,38,0.15)', borderRadius: 8, border: '1px solid rgba(220,38,38,0.3)', fontSize: 13, color: '#FCA5A5' }}>{err}</div>}
+                  <button type="submit" disabled={loading || !dobSetup}
+                    style={{ width: '100%', marginTop: 14, padding: '12px', borderRadius: 10, border: 'none', background: dobSetup ? C.accent : 'rgba(255,255,255,0.1)', color: '#fff', cursor: dobSetup ? 'pointer' : 'default', fontFamily: Fh, fontSize: 13.5, fontWeight: 700 }}>
+                    {loading ? 'Enregistrement...' : 'Confirmer'}
+                  </button>
+                </div>
+              </form>
+            </>
+          )}
+
+          {token && !needDobSetup && dossier && (
             <div>
-              <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 14, padding: '18px 22px', border: '1px solid rgba(255,255,255,0.12)', marginBottom: 18 }}>
+              {/* Bandeau profil */}
+              <div style={card}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                  <div style={{ width: 48, height: 48, background: C.accent, borderRadius: 11, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 19, fontWeight: 900, color: '#fff', fontFamily: Fh, flexShrink: 0 }}>
-                    {result.prenom ? result.prenom[0] : ''}{result.nom_initial || ''}
+                  <div style={{ width: 48, height: 48, background: C.accent, borderRadius: 11, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 900, color: '#fff', fontFamily: Fh, flexShrink: 0 }}>
+                    {dossier.prenom ? dossier.prenom[0] : ''}{dossier.nom_initial || ''}
                   </div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ color: '#fff', fontWeight: 800, fontSize: 17, fontFamily: Fh }}>{result.prenom} {result.nom_initial}</div>
-                    <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12, marginTop: 2 }}>NUD: {result.nud} - {result.anc_mois} mois</div>
+                    <div style={{ color: '#fff', fontWeight: 800, fontSize: 17, fontFamily: Fh }}>{dossier.prenom} {dossier.nom_initial}</div>
+                    <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12, marginTop: 2 }}>NUD: {dossier.nud} · {dossier.anc_mois} mois d'ancienneté</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 11, padding: '4px 12px', borderRadius: 99, fontWeight: 700, background: result.etape === 4 ? C.green : result.etape === 3 ? C.amber : 'rgba(255,255,255,0.15)', color: '#fff' }}>{result.statut}</div>
+                    <div style={{ fontSize: 11, padding: '4px 12px', borderRadius: 99, fontWeight: 700, background: dossier.etape === 4 ? C.green : dossier.etape === 3 ? C.amber : 'rgba(255,255,255,0.15)', color: '#fff' }}>{dossier.statut}</div>
                   </div>
                 </div>
               </div>
-              <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 14, padding: '18px 22px', border: '1px solid rgba(255,255,255,0.12)', marginBottom: 18 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 16 }}>Etape de votre dossier</div>
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', position: 'relative' }}>
-                  <div style={{ position: 'absolute', top: 16, left: '10%', right: '10%', height: 3, background: 'rgba(255,255,255,0.1)', borderRadius: 99 }}>
-                    <div style={{ height: '100%', width: Math.min(100, (result.etape - 1) / 3 * 100) + '%', background: C.accent, borderRadius: 99 }} />
-                  </div>
-                  {ETAPES.map(et => (
-                    <div key={et.n} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, flex: 1, position: 'relative' }}>
-                      <div style={{ width: 32, height: 32, borderRadius: '50%', background: et.n <= result.etape ? C.accent : 'rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, border: et.n === result.etape ? '3px solid #fff' : '3px solid transparent', zIndex: 1 }}>
-                        <span style={{ color: '#fff', fontWeight: 700 }}>{et.n < result.etape ? 'v' : et.n}</span>
+
+              {/* Onglets */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 16, overflowX: 'auto', paddingBottom: 4 }}>
+                <button onClick={() => setTab('suivi')} style={tabBtn(tab === 'suivi')}>Suivi</button>
+                <button onClick={() => setTab('pieces')} style={tabBtn(tab === 'pieces')}>
+                  Pièces {(piecesData.pieces_manquantes || []).length > 0 && <span style={{ marginLeft: 6, padding: '1px 7px', borderRadius: 99, background: 'rgba(220,38,38,0.8)', color: '#fff', fontSize: 10 }}>{piecesData.pieces_manquantes.length}</span>}
+                </button>
+                <button onClick={() => setTab('propositions')} style={tabBtn(tab === 'propositions')}>
+                  Propositions {propositions.filter(p => p.statut === 'en_attente').length > 0 && <span style={{ marginLeft: 6, padding: '1px 7px', borderRadius: 99, background: C.amber, color: '#fff', fontSize: 10 }}>{propositions.filter(p => p.statut === 'en_attente').length}</span>}
+                </button>
+                <button onClick={() => setTab('renouvellement')} style={tabBtn(tab === 'renouvellement')}>
+                  Renouvellement {dossier.renouvellement && dossier.renouvellement.urgent && <span style={{ marginLeft: 6, color: '#FCA5A5' }}>!</span>}
+                </button>
+                <button onClick={() => setTab('attestation')} style={tabBtn(tab === 'attestation')}>Attestation</button>
+              </div>
+
+              {/* Suivi */}
+              {tab === 'suivi' && (
+                <>
+                  <div style={card}>
+                    <div style={cardTitle}>Etape de votre dossier</div>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', position: 'relative' }}>
+                      <div style={{ position: 'absolute', top: 16, left: '10%', right: '10%', height: 3, background: 'rgba(255,255,255,0.1)', borderRadius: 99 }}>
+                        <div style={{ height: '100%', width: Math.min(100, (dossier.etape - 1) / 3 * 100) + '%', background: C.accent, borderRadius: 99 }} />
                       </div>
-                      <div style={{ fontSize: 10, color: et.n <= result.etape ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.25)', textAlign: 'center', fontWeight: et.n === result.etape ? 700 : 400, maxWidth: 80, lineHeight: 1.3 }}>{et.label}</div>
+                      {ETAPES.map(et => (
+                        <div key={et.n} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, flex: 1, position: 'relative' }}>
+                          <div style={{ width: 32, height: 32, borderRadius: '50%', background: et.n <= dossier.etape ? C.accent : 'rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, border: et.n === dossier.etape ? '3px solid #fff' : '3px solid transparent', zIndex: 1 }}>
+                            <span style={{ color: '#fff', fontWeight: 700 }}>{et.n < dossier.etape ? 'v' : et.n}</span>
+                          </div>
+                          <div style={{ fontSize: 10, color: et.n <= dossier.etape ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.25)', textAlign: 'center', fontWeight: et.n === dossier.etape ? 700 : 400, maxWidth: 80, lineHeight: 1.3 }}>{et.label}</div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              </div>
-              {(result.actions_requises || []).length > 0 && (
-                <div style={{ background: 'rgba(217,119,6,0.15)', borderRadius: 12, padding: '14px 18px', border: '1px solid rgba(217,119,6,0.3)', marginBottom: 16 }}>
-                  <div style={{ fontWeight: 700, color: '#FCD34D', fontSize: 13, marginBottom: 8 }}>Action(s) requise(s)</div>
-                  {result.actions_requises.map((a, i) => <div key={i} style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.7)', marginBottom: 4 }}>- {a}</div>)}
+                  </div>
+
+                  {(dossier.actions_requises || []).length > 0 && (
+                    <div style={{ background: 'rgba(217,119,6,0.15)', borderRadius: 12, padding: '14px 18px', border: '1px solid rgba(217,119,6,0.3)', marginBottom: 16 }}>
+                      <div style={{ fontWeight: 700, color: '#FCD34D', fontSize: 13, marginBottom: 8 }}>Action(s) requise(s)</div>
+                      {dossier.actions_requises.map((a, i) => <div key={i} style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.75)', marginBottom: 4 }}>- {a}</div>)}
+                    </div>
+                  )}
+
+                  <div style={card}>
+                    <div style={cardTitle}>Historique</div>
+                    <div style={{ position: 'relative', paddingLeft: 20 }}>
+                      <div style={{ position: 'absolute', left: 7, top: 6, bottom: 0, width: 2, background: 'rgba(255,255,255,0.1)' }} />
+                      {(dossier.historique || []).map((ev, i) => (
+                        <div key={i} style={{ position: 'relative', marginBottom: 12 }}>
+                          <div style={{ position: 'absolute', left: -17, top: 4, width: 10, height: 10, borderRadius: '50%', background: C.accent, boxShadow: '0 0 0 3px #0B1E3D, 0 0 0 4px ' + C.accent }} />
+                          <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)' }}>{ev.date}</div>
+                          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.85)', fontWeight: 600, marginTop: 1 }}>{ev.type}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Pieces */}
+              {tab === 'pieces' && (
+                <>
+                  <div style={card}>
+                    <div style={cardTitle}>Déposer une pièce</div>
+                    <form onSubmit={uploadPiece}>
+                      <select value={pieceCode} onChange={e => setPieceCode(e.target.value)} required
+                        style={{ width: '100%', padding: '11px 14px', borderRadius: 9, border: '1.5px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.08)', color: '#fff', fontFamily: Fb, fontSize: 13, boxSizing: 'border-box', outline: 'none', marginBottom: 10 }}>
+                        <option value="" style={{ color: '#000' }}>-- Type de pièce --</option>
+                        {(piecesData.pieces_attendues || []).map(p => (
+                          <option key={p.code} value={p.code} style={{ color: '#000' }}>{p.libelle}{p.obligatoire ? ' *' : ''}</option>
+                        ))}
+                      </select>
+                      <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic" onChange={e => setPieceFile(e.target.files && e.target.files[0])}
+                        style={{ width: '100%', padding: '9px', borderRadius: 9, border: '1.5px dashed rgba(255,255,255,0.2)', background: 'rgba(255,255,255,0.04)', color: 'rgba(255,255,255,0.7)', fontSize: 12, boxSizing: 'border-box', marginBottom: 12 }} />
+                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginBottom: 12 }}>Formats acceptés : PDF, JPG, PNG, WEBP, HEIC · 8 Mo max</div>
+                      <button type="submit" disabled={uploading || !pieceCode || !pieceFile}
+                        style={{ width: '100%', padding: '11px', borderRadius: 9, border: 'none', background: (pieceCode && pieceFile) ? C.accent : 'rgba(255,255,255,0.1)', color: '#fff', cursor: (pieceCode && pieceFile && !uploading) ? 'pointer' : 'default', fontFamily: Fh, fontSize: 13, fontWeight: 700 }}>
+                        {uploading ? 'Envoi...' : 'Envoyer la pièce'}
+                      </button>
+                    </form>
+                  </div>
+
+                  <div style={card}>
+                    <div style={cardTitle}>Mes pièces déposées</div>
+                    {(piecesData.pieces_deposees || []).length === 0 ? (
+                      <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12.5, textAlign: 'center', padding: 20 }}>Aucune pièce déposée</div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {piecesData.pieces_deposees.map(p => (
+                          <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.04)', borderRadius: 9, border: '1px solid rgba(255,255,255,0.08)' }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 12.5, color: '#fff', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.libelle_type || p.code}</div>
+                              <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>{p.filename} · {((p.size || 0) / 1024).toFixed(0)} Ko · {(p.uploaded_at || '').substring(0, 10)}</div>
+                              {p.motif_rejet && <div style={{ fontSize: 11, color: '#FCA5A5', marginTop: 4 }}>Refus: {p.motif_rejet}</div>}
+                            </div>
+                            <div style={{ fontSize: 10.5, padding: '3px 9px', borderRadius: 99, fontWeight: 700, background: PIECE_STATUT_COLOR[p.statut] || 'rgba(255,255,255,0.15)', color: '#fff' }}>
+                              {PIECE_STATUT_LABEL[p.statut] || p.statut}
+                            </div>
+                            <button onClick={() => telechargerPiece(p.id)} style={{ padding: '5px 10px', background: 'rgba(255,255,255,0.08)', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>Voir</button>
+                            {p.statut !== 'validee' && (
+                              <button onClick={() => deletePiece(p.id)} style={{ padding: '5px 10px', background: 'rgba(220,38,38,0.2)', color: '#FCA5A5', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>Supprimer</button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {(piecesData.pieces_manquantes || []).length > 0 && (
+                    <div style={{ background: 'rgba(220,38,38,0.12)', borderRadius: 12, padding: '14px 18px', border: '1px solid rgba(220,38,38,0.3)', marginBottom: 16 }}>
+                      <div style={{ fontWeight: 700, color: '#FCA5A5', fontSize: 13, marginBottom: 8 }}>Pièces obligatoires manquantes</div>
+                      {piecesData.pieces_manquantes.map(p => (
+                        <div key={p.code} style={{ fontSize: 12, color: 'rgba(255,255,255,0.75)', marginBottom: 3 }}>- {p.libelle}</div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Propositions */}
+              {tab === 'propositions' && (
+                <>
+                  {propositions.length === 0 ? (
+                    <div style={card}>
+                      <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', padding: 20 }}>Aucune proposition pour le moment.</div>
+                    </div>
+                  ) : (
+                    propositions.map(p => {
+                      const l = p.logement || {}
+                      const enAttente = p.statut === 'en_attente'
+                      const joursRestants = p.deadline ? Math.ceil((new Date(p.deadline).getTime() - Date.now()) / 86400000) : null
+                      const dateProp = (p.date_proposition || '').substring(0, 10)
+                      const dateLim = (p.deadline || '').substring(0, 10)
+                      const statutBadge = { en_attente: { bg: C.amber, label: 'En attente de réponse' }, acceptee: { bg: C.green, label: 'Acceptée' }, refusee: { bg: 'rgba(220,38,38,0.8)', label: 'Refusée' }, expiree: { bg: 'rgba(100,116,139,0.8)', label: 'Expirée' } }[p.statut] || { bg: 'rgba(255,255,255,0.15)', label: p.statut }
+                      return (
+                        <div key={p.id} style={card}>
+                          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14, gap: 10 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ color: '#fff', fontWeight: 800, fontSize: 15, fontFamily: Fh }}>{l.typ || '?'} — {l.adresse || l.ref || 'Logement'}</div>
+                              <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12, marginTop: 3 }}>{l.bailleur || ''}{l.quartier ? ' · ' + l.quartier : ''}{l.surface ? ' · ' + l.surface + ' m²' : ''}{l.loyer ? ' · ' + l.loyer + ' €' : ''}</div>
+                            </div>
+                            <div style={{ fontSize: 11, padding: '4px 10px', borderRadius: 99, fontWeight: 700, background: statutBadge.bg, color: '#fff', whiteSpace: 'nowrap' }}>
+                              {statutBadge.label}
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 12 }}>
+                            Proposition du {dateProp}{dateLim && <> · Réponse avant le {dateLim}</>}
+                            {enAttente && joursRestants !== null && (
+                              <span style={{ marginLeft: 8, color: joursRestants <= 3 ? '#FCA5A5' : '#FCD34D', fontWeight: 700 }}>
+                                {joursRestants > 0 ? '(' + joursRestants + ' j restants)' : '(expire aujourd\'hui)'}
+                              </span>
+                            )}
+                          </div>
+                          {p.motif_refus && (
+                            <div style={{ fontSize: 12, color: '#FCA5A5', marginBottom: 10 }}>Motif: {p.motif_refus}</div>
+                          )}
+                          {enAttente && (
+                            <>
+                              <textarea value={propMotif[p.id] || ''} onChange={e => setPropMotif(m => ({ ...m, [p.id]: e.target.value }))}
+                                placeholder="Motif (obligatoire en cas de refus)"
+                                style={{ width: '100%', padding: '10px', borderRadius: 9, border: '1.5px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.06)', color: '#fff', fontFamily: Fb, fontSize: 12.5, boxSizing: 'border-box', resize: 'vertical', minHeight: 60, marginBottom: 12 }} />
+                              <div style={{ display: 'flex', gap: 10 }}>
+                                <button onClick={() => repondreProposition(p.id, 'acceptee')}
+                                  style={{ flex: 1, padding: '11px', borderRadius: 9, border: 'none', background: C.green, color: '#fff', cursor: 'pointer', fontFamily: Fh, fontSize: 13, fontWeight: 700 }}>
+                                  Accepter
+                                </button>
+                                <button onClick={() => repondreProposition(p.id, 'refusee')}
+                                  style={{ flex: 1, padding: '11px', borderRadius: 9, border: 'none', background: 'rgba(220,38,38,0.8)', color: '#fff', cursor: 'pointer', fontFamily: Fh, fontSize: 13, fontWeight: 700 }}>
+                                  Refuser
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      )
+                    })
+                  )}
+                </>
+              )}
+
+              {/* Renouvellement */}
+              {tab === 'renouvellement' && (
+                <div style={card}>
+                  <div style={cardTitle}>Renouvellement annuel</div>
+                  {dossier.renouvellement ? (
+                    <>
+                      <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, lineHeight: 1.7, marginBottom: 14 }}>
+                        Votre demande de logement social doit être renouvelée chaque année. A défaut, elle sera considérée comme abandonnée.
+                      </div>
+                      <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 10, padding: '14px 16px', marginBottom: 14 }}>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>Référence (dépôt ou dernier renouvellement)</div>
+                        <div style={{ fontSize: 14, color: '#fff', fontWeight: 600 }}>{dossier.renouvellement.date_base || '-'}</div>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 12, marginBottom: 4 }}>Echéance</div>
+                        <div style={{ fontSize: 14, color: dossier.renouvellement.urgent ? '#FCA5A5' : '#fff', fontWeight: 600 }}>
+                          {dossier.renouvellement.date_limite}{dossier.renouvellement.expire && <span> (expirée)</span>}
+                        </div>
+                        {dossier.renouvellement.jours_restants !== undefined && !dossier.renouvellement.expire && (
+                          <div style={{ fontSize: 12, color: dossier.renouvellement.urgent ? '#FCA5A5' : 'rgba(255,255,255,0.5)', marginTop: 4 }}>
+                            {dossier.renouvellement.jours_restants} jours restants
+                          </div>
+                        )}
+                      </div>
+                      <button onClick={renouveler}
+                        style={{ width: '100%', padding: '12px', borderRadius: 10, border: 'none', background: C.accent, color: '#fff', cursor: 'pointer', fontFamily: Fh, fontSize: 14, fontWeight: 700 }}>
+                        Renouveler ma demande maintenant
+                      </button>
+                    </>
+                  ) : (
+                    <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13, padding: 12 }}>Informations indisponibles</div>
+                  )}
                 </div>
               )}
-              <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 14, padding: '18px 22px', border: '1px solid rgba(255,255,255,0.12)', marginBottom: 18 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 14 }}>Historique</div>
-                <div style={{ position: 'relative', paddingLeft: 20 }}>
-                  <div style={{ position: 'absolute', left: 7, top: 6, bottom: 0, width: 2, background: 'rgba(255,255,255,0.1)' }} />
-                  {(result.historique || []).map((ev, i) => (
-                    <div key={i} style={{ position: 'relative', marginBottom: 12 }}>
-                      <div style={{ position: 'absolute', left: -17, top: 4, width: 10, height: 10, borderRadius: '50%', background: C.accent, boxShadow: '0 0 0 3px #0B1E3D, 0 0 0 4px ' + C.accent }} />
-                      <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)' }}>{ev.date}</div>
-                      <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.85)', fontWeight: 600, marginTop: 1 }}>{ev.type}</div>
-                    </div>
-                  ))}
+
+              {/* Attestation */}
+              {tab === 'attestation' && (
+                <div style={card}>
+                  <div style={cardTitle}>Attestation de dépôt</div>
+                  <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, lineHeight: 1.7, marginBottom: 14 }}>
+                    Téléchargez votre attestation officielle de dépôt de demande de logement social. Ce document atteste de l'existence et de l'ancienneté de votre demande auprès de la Mairie de Saint-Denis.
+                  </div>
+                  <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 10, padding: '12px 16px', marginBottom: 14, fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
+                    Document signé électroniquement · Hash SHA-256 d'authentification · Valable auprès de tout organisme exigeant un justificatif de demande.
+                  </div>
+                  <button onClick={telechargerAttestation}
+                    style={{ width: '100%', padding: '12px', borderRadius: 10, border: 'none', background: C.accent, color: '#fff', cursor: 'pointer', fontFamily: Fh, fontSize: 14, fontWeight: 700 }}>
+                    Télécharger l'attestation (PDF)
+                  </button>
                 </div>
-              </div>
-              <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 12, padding: '14px 18px', border: '1px solid rgba(255,255,255,0.08)', marginBottom: 18 }}>
+              )}
+
+              {/* Contact (toujours visible) */}
+              <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 12, padding: '14px 18px', border: '1px solid rgba(255,255,255,0.08)', marginBottom: 16, marginTop: 8 }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Contact</div>
-                <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)', lineHeight: 2 }}>
-                  <div>{result.contact && result.contact.adresse}</div>
-                  <div>Tel: {result.contact && result.contact.tel}</div>
-                  <div>Mail: {result.contact && result.contact.email}</div>
-                  <div>Horaires: {result.contact && result.contact.horaires}</div>
+                <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)', lineHeight: 1.9 }}>
+                  <div>{dossier.contact && dossier.contact.service}</div>
+                  <div>{dossier.contact && dossier.contact.adresse}</div>
+                  <div>Tel: {dossier.contact && dossier.contact.tel}</div>
+                  <div>Mail: {dossier.contact && dossier.contact.email}</div>
+                  <div>Horaires: {dossier.contact && dossier.contact.horaires}</div>
                 </div>
               </div>
-              <button onClick={() => { setResult(null); setNud('') }}
-                style={{ width: '100%', padding: '12px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', fontFamily: Fh, fontSize: 13, fontWeight: 600 }}>
-                Rechercher un autre dossier
-              </button>
             </div>
           )}
+
         </div>
       </div>
       <div style={{ padding: '14px 30px', borderTop: '1px solid rgba(255,255,255,0.06)', textAlign: 'center', color: 'rgba(255,255,255,0.2)', fontSize: 11 }}>

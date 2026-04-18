@@ -2152,20 +2152,123 @@ app.post('/api/rapports/cron', (req, res) => {
 })
 
 // ============================================================
-// PORTAIL CANDIDAT (public)
+// PORTAIL CANDIDAT v2 (public) - auth renforcee, pieces, propositions,
+// renouvellement, attestation PDF
 // ============================================================
 
-app.get('/api/portail/dossier/:nud', (req, res) => {
-  const { nud } = req.params
-  if (!nud || nud.length < 4) return res.status(400).json({ error: 'NUD invalide' })
+const CONTACT_974 = {
+  service: 'Service Habitat - Mairie de Saint-Denis',
+  adresse: '2 rue de Paris, 97400 Saint-Denis',
+  tel: '0262 40 01 67',
+  horaires: 'Lun-Ven 8h00-16h00',
+  email: 'habitat@saintdenis.re'
+}
 
+// Liste officielle des pieces attendues pour un dossier de logement social
+const PIECES_ATTENDUES = [
+  { code: 'cni', libelle: 'Piece d identite (CNI / passeport / titre de sejour)', obligatoire: true, duree_validite_mois: 60 },
+  { code: 'livret_famille', libelle: 'Livret de famille', obligatoire: false },
+  { code: 'acte_naissance', libelle: 'Acte(s) de naissance des enfants', obligatoire: false },
+  { code: 'avis_imposition_n1', libelle: 'Avis d imposition N-1', obligatoire: true, duree_validite_mois: 12 },
+  { code: 'avis_imposition_n2', libelle: 'Avis d imposition N-2', obligatoire: true, duree_validite_mois: 24 },
+  { code: 'justificatif_domicile', libelle: 'Justificatif de domicile (moins de 3 mois)', obligatoire: true, duree_validite_mois: 3 },
+  { code: 'bulletins_salaire', libelle: '3 derniers bulletins de salaire', obligatoire: false, duree_validite_mois: 3 },
+  { code: 'attestation_pole_emploi', libelle: 'Attestation Pole Emploi / France Travail', obligatoire: false, duree_validite_mois: 3 },
+  { code: 'attestation_caf', libelle: 'Attestation CAF', obligatoire: false, duree_validite_mois: 3 },
+  { code: 'jugement_divorce', libelle: 'Jugement de divorce / separation', obligatoire: false },
+  { code: 'attestation_handicap', libelle: 'Reconnaissance MDPH / handicap', obligatoire: false },
+  { code: 'attestation_grossesse', libelle: 'Certificat de grossesse', obligatoire: false },
+  { code: 'decision_dalo', libelle: 'Decision DALO', obligatoire: false },
+  { code: 'autre', libelle: 'Autre piece', obligatoire: false }
+]
+
+// --- SESSIONS PORTAIL ---
+// Sessions courtes (30 min) indexees par token opaque
+const PORTAIL_SESSIONS = new Map()
+const PORTAIL_TTL_MS = 30 * 60 * 1000
+
+function nettoyerSessionsExpirees() {
+  const now = Date.now()
+  for (const [tok, s] of PORTAIL_SESSIONS.entries()) {
+    if (s.expire_at < now) PORTAIL_SESSIONS.delete(tok)
+  }
+}
+
+function normNud(s) { return (s || '').toLowerCase().replace(/[\s-]/g, '') }
+function normDate(s) {
+  if (!s) return ''
+  // Accepte YYYY-MM-DD ou JJ/MM/AAAA et renvoie YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+  if (m) return m[3] + '-' + m[2] + '-' + m[1]
+  return s
+}
+
+function findDemByNud(nud) {
+  const demandeurs = readData('demandeurs.json')
+  return demandeurs.find(d => d.nud && normNud(d.nud) === normNud(nud))
+}
+
+function requirePortailAuth(req, res, next) {
+  nettoyerSessionsExpirees()
+  const tok = req.headers['x-portail-token'] || (req.query && req.query.token)
+  if (!tok) return res.status(401).json({ error: 'Non authentifie' })
+  const sess = PORTAIL_SESSIONS.get(tok)
+  if (!sess) return res.status(401).json({ error: 'Session expiree' })
+  // Rafraichit le TTL a chaque requete
+  sess.expire_at = Date.now() + PORTAIL_TTL_MS
+  req.portailDem = sess.dem_id
+  next()
+}
+
+// Auth portail : NUD + date de naissance
+app.post('/api/portail/auth', (req, res) => {
+  const { nud, date_naissance } = req.body || {}
+  if (!nud) return res.status(400).json({ error: 'NUD requis' })
+  const dem = findDemByNud(nud)
+  if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
+
+  // Si le demandeur n a pas de date de naissance dans sa fiche, on accepte
+  // NUD seul (mode "compat"). Sinon on exige la correspondance exacte.
+  if (dem.date_naissance) {
+    if (!date_naissance) {
+      return res.status(400).json({ error: 'Date de naissance requise', need_dob: true })
+    }
+    if (normDate(date_naissance) !== normDate(dem.date_naissance)) {
+      addLog(null, 'PORTAIL_AUTH_KO', 'nud: ' + nud + ' (dob mismatch)')
+      return res.status(401).json({ error: 'Informations incorrectes' })
+    }
+  }
+
+  const token = randomBytes(24).toString('hex')
+  PORTAIL_SESSIONS.set(token, {
+    dem_id: dem.id,
+    nud: dem.nud,
+    expire_at: Date.now() + PORTAIL_TTL_MS
+  })
+  addLog(null, 'PORTAIL_AUTH_OK', 'nud: ' + dem.nud)
+  res.json({
+    ok: true,
+    token,
+    expires_in: PORTAIL_TTL_MS / 1000,
+    need_dob_setup: !dem.date_naissance
+  })
+})
+
+// Deconnexion
+app.post('/api/portail/logout', requirePortailAuth, (req, res) => {
+  const tok = req.headers['x-portail-token']
+  PORTAIL_SESSIONS.delete(tok)
+  res.json({ ok: true })
+})
+
+// Dossier complet du candidat authentifie (remplace l ancien dossier public)
+app.get('/api/portail/dossier', requirePortailAuth, (req, res) => {
   const demandeurs = readData('demandeurs.json')
   const audiences = readData('audiences.json')
   const decisions = readData('decisions_cal.json')
-
-  const clean = s => (s || '').toLowerCase().replace(/[\s-]/g, '')
-  const dem = demandeurs.find(d => d.nud && clean(d.nud) === clean(nud))
-
+  const propositions = readData('propositions.json')
+  const dem = demandeurs.find(d => d.id === req.portailDem)
   if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
 
   const audPubliques = audiences
@@ -2192,6 +2295,476 @@ app.get('/api/portail/dossier/:nud', (req, res) => {
     ...decPubliques.map(d => ({ date: d.date, type: 'Commission CAL - ' + d.decision }))
   ]
 
+  // Renouvellement : base = date_depot ou created_at ou premier parcours
+  const dateBase = dem.dernier_renouvellement || dem.date_depot || (dem.parcours && dem.parcours[0] && dem.parcours[0].date) || null
+  let renouvellement = null
+  if (dateBase) {
+    const d = /^\d{2}\/\d{2}\/\d{4}$/.test(dateBase)
+      ? new Date(dateBase.split('/').reverse().join('-'))
+      : new Date(dateBase)
+    if (!isNaN(d.getTime())) {
+      const limite = new Date(d)
+      limite.setFullYear(limite.getFullYear() + 1)
+      const joursRestants = Math.ceil((limite.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+      renouvellement = {
+        date_base: d.toISOString().substring(0, 10),
+        date_limite: limite.toISOString().substring(0, 10),
+        jours_restants: joursRestants,
+        urgent: joursRestants <= 60,
+        expire: joursRestants <= 0
+      }
+    }
+  }
+
+  // Propositions en attente de reponse
+  const propsAttente = propositions.filter(p => p.dem_id === dem.id && p.statut === 'en_attente')
+
+  res.json({
+    id: dem.id,
+    nud: dem.nud,
+    prenom: dem.prenom,
+    nom_initial: dem.nom ? dem.nom[0] + '.' : '',
+    nom: dem.nom,
+    anc_mois: dem.anc || 0,
+    typ_souhaitee: dem.typ_v,
+    statut,
+    etape,
+    pieces_ok: !!dem.pieces,
+    date_naissance_ok: !!dem.date_naissance,
+    historique,
+    actions_requises: [
+      !dem.pieces && 'Pieces justificatives incompletes - utilisez le module pieces pour les deposer',
+      renouvellement && renouvellement.urgent && !renouvellement.expire && 'Renouvellement de demande a effectuer dans ' + renouvellement.jours_restants + ' jours',
+      renouvellement && renouvellement.expire && 'Renouvellement EN RETARD - risque de radiation',
+      propsAttente.length > 0 && 'Vous avez ' + propsAttente.length + ' proposition(s) a traiter'
+    ].filter(Boolean),
+    renouvellement,
+    propositions_en_attente: propsAttente.length,
+    contact: CONTACT_974
+  })
+})
+
+// --- PIECES JUSTIFICATIVES ---
+
+function getPiecesDir(demId) {
+  const dir = join(DATA, 'pieces', demId)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+app.get('/api/portail/pieces', requirePortailAuth, (req, res) => {
+  const pieces = readData('pieces_justificatives.json')
+  const dem = readData('demandeurs.json').find(d => d.id === req.portailDem)
+  const miennes = pieces.filter(p => p.dem_id === req.portailDem).map(p => ({
+    id: p.id,
+    code: p.code,
+    libelle_type: (PIECES_ATTENDUES.find(x => x.code === p.code) || {}).libelle || p.code,
+    filename: p.filename,
+    mimetype: p.mimetype,
+    size: p.size,
+    uploaded_at: p.uploaded_at,
+    statut: p.statut,
+    motif_rejet: p.motif_rejet || null,
+    validee_le: p.validee_le || null
+  }))
+  res.json({
+    pieces_attendues: PIECES_ATTENDUES,
+    pieces_deposees: miennes,
+    pieces_manquantes: PIECES_ATTENDUES.filter(a => a.obligatoire && !miennes.some(m => m.code === a.code && m.statut !== 'refusee')),
+    pieces_globalement_ok: !!(dem && dem.pieces)
+  })
+})
+
+app.post('/api/portail/pieces/upload', requirePortailAuth, (req, res) => {
+  const { code, filename, mimetype, contenu_base64 } = req.body || {}
+  if (!code) return res.status(400).json({ error: 'Code piece requis' })
+  if (!PIECES_ATTENDUES.find(p => p.code === code)) return res.status(400).json({ error: 'Type de piece inconnu' })
+  if (!contenu_base64 || typeof contenu_base64 !== 'string') return res.status(400).json({ error: 'Contenu manquant' })
+
+  const buf = Buffer.from(contenu_base64.replace(/^data:[^;]+;base64,/, ''), 'base64')
+  if (buf.length > 8 * 1024 * 1024) return res.status(400).json({ error: 'Fichier trop volumineux (max 8 Mo)' })
+  if (buf.length < 100) return res.status(400).json({ error: 'Fichier vide ou corrompu' })
+
+  const allowedMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'application/pdf']
+  if (mimetype && !allowedMimes.includes(mimetype)) {
+    return res.status(400).json({ error: 'Type de fichier non autorise (PDF, JPG, PNG uniquement)' })
+  }
+
+  const all = readData('pieces_justificatives.json')
+  const id = 'P' + Date.now() + randomBytes(3).toString('hex')
+  const ext = (filename || '').split('.').pop() || (mimetype === 'application/pdf' ? 'pdf' : 'jpg')
+  const safeName = id + '.' + ext.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const dir = getPiecesDir(req.portailDem)
+  writeFileSync(join(dir, safeName), buf)
+
+  const piece = {
+    id,
+    dem_id: req.portailDem,
+    code,
+    filename: filename || safeName,
+    stored_name: safeName,
+    mimetype: mimetype || 'application/octet-stream',
+    size: buf.length,
+    uploaded_at: new Date().toISOString(),
+    uploaded_by: 'candidat',
+    statut: 'en_attente',
+    motif_rejet: null
+  }
+  all.push(piece)
+  writeData('pieces_justificatives.json', all)
+
+  // Ajouter un parcours dans le demandeur
+  const demandeurs = readData('demandeurs.json')
+  const idx = demandeurs.findIndex(d => d.id === req.portailDem)
+  if (idx !== -1) {
+    if (!demandeurs[idx].parcours) demandeurs[idx].parcours = []
+    demandeurs[idx].parcours.push({
+      date: nowDate(),
+      type: 'Depot de piece',
+      detail: 'Via portail : ' + (PIECES_ATTENDUES.find(x => x.code === code) || {}).libelle
+    })
+    writeData('demandeurs.json', demandeurs)
+  }
+
+  addLog(null, 'PORTAIL_UPLOAD_PIECE', 'dem: ' + req.portailDem + ' - ' + code + ' - ' + buf.length + ' octets')
+  res.json({ ok: true, piece })
+})
+
+app.delete('/api/portail/pieces/:id', requirePortailAuth, (req, res) => {
+  const all = readData('pieces_justificatives.json')
+  const idx = all.findIndex(p => p.id === req.params.id && p.dem_id === req.portailDem)
+  if (idx === -1) return res.status(404).json({ error: 'Piece introuvable' })
+  if (all[idx].statut === 'validee') return res.status(403).json({ error: 'Piece deja validee - impossible de supprimer' })
+  // Supprimer le fichier physique
+  try { unlinkSync(join(getPiecesDir(req.portailDem), all[idx].stored_name)) } catch (e) { }
+  const removed = all.splice(idx, 1)[0]
+  writeData('pieces_justificatives.json', all)
+  addLog(null, 'PORTAIL_DELETE_PIECE', 'dem: ' + req.portailDem + ' - ' + removed.code)
+  res.json({ ok: true })
+})
+
+// Telechargement par le candidat de sa propre piece
+app.get('/api/portail/pieces/:id/fichier', requirePortailAuth, (req, res) => {
+  const all = readData('pieces_justificatives.json')
+  const p = all.find(x => x.id === req.params.id && x.dem_id === req.portailDem)
+  if (!p) return res.status(404).json({ error: 'Piece introuvable' })
+  const path = join(getPiecesDir(req.portailDem), p.stored_name)
+  if (!existsSync(path)) return res.status(404).json({ error: 'Fichier physique absent' })
+  res.type(p.mimetype || 'application/octet-stream')
+  res.setHeader('Content-Disposition', 'inline; filename="' + encodeURIComponent(p.filename) + '"')
+  res.send(readFileSync(path))
+})
+
+// --- COTE AGENT : validation / rejet des pieces ---
+
+app.get('/api/pieces/:dem_id', requireAuth, (req, res) => {
+  const pieces = readData('pieces_justificatives.json').filter(p => p.dem_id === req.params.dem_id)
+  res.json({
+    pieces_attendues: PIECES_ATTENDUES,
+    pieces: pieces.map(p => ({
+      ...p,
+      libelle_type: (PIECES_ATTENDUES.find(x => x.code === p.code) || {}).libelle || p.code
+    }))
+  })
+})
+
+app.get('/api/pieces/:dem_id/:id/fichier', requireAuth, (req, res) => {
+  const p = readData('pieces_justificatives.json').find(x => x.id === req.params.id && x.dem_id === req.params.dem_id)
+  if (!p) return res.status(404).json({ error: 'Piece introuvable' })
+  const path = join(getPiecesDir(req.params.dem_id), p.stored_name)
+  if (!existsSync(path)) return res.status(404).json({ error: 'Fichier physique absent' })
+  res.type(p.mimetype || 'application/octet-stream')
+  res.setHeader('Content-Disposition', 'inline; filename="' + encodeURIComponent(p.filename) + '"')
+  res.send(readFileSync(path))
+})
+
+app.post('/api/pieces/:id/valider', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const all = readData('pieces_justificatives.json')
+  const idx = all.findIndex(p => p.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Piece introuvable' })
+  all[idx].statut = 'validee'
+  all[idx].validee_le = new Date().toISOString()
+  all[idx].validee_par = req.user.prenom + ' ' + req.user.nom
+  all[idx].motif_rejet = null
+  writeData('pieces_justificatives.json', all)
+  addLog(req.user, 'PIECE_VALIDEE', all[idx].id + ' / ' + all[idx].code)
+  res.json(all[idx])
+})
+
+app.post('/api/pieces/:id/refuser', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const { motif } = req.body || {}
+  if (!motif) return res.status(400).json({ error: 'Motif de refus requis' })
+  const all = readData('pieces_justificatives.json')
+  const idx = all.findIndex(p => p.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Piece introuvable' })
+  all[idx].statut = 'refusee'
+  all[idx].motif_rejet = motif
+  all[idx].validee_le = new Date().toISOString()
+  all[idx].validee_par = req.user.prenom + ' ' + req.user.nom
+  writeData('pieces_justificatives.json', all)
+  addLog(req.user, 'PIECE_REFUSEE', all[idx].id + ' / ' + motif)
+  res.json(all[idx])
+})
+
+// --- PROPOSITIONS : accepter / refuser cote candidat ---
+
+app.get('/api/portail/propositions', requirePortailAuth, (req, res) => {
+  const props = readData('propositions.json').filter(p => p.dem_id === req.portailDem)
+  const logements = readData('logements.json')
+  const enrichies = props.map(p => {
+    const l = logements.find(x => x.id === p.logement_id) || {}
+    return {
+      ...p,
+      logement: {
+        ref: l.ref, adresse: l.adresse, quartier: l.quartier, typ: l.typ,
+        surface: l.surface, loyer: l.loyer, bailleur: l.bailleur, operation: l.operation
+      }
+    }
+  }).sort((a, b) => (b.date_proposition || '').localeCompare(a.date_proposition || ''))
+  res.json(enrichies)
+})
+
+app.post('/api/portail/proposition/:id/repondre', requirePortailAuth, (req, res) => {
+  const { reponse, motif } = req.body || {}
+  if (!['acceptee', 'refusee'].includes(reponse)) return res.status(400).json({ error: 'Reponse invalide' })
+  if (reponse === 'refusee' && !motif) return res.status(400).json({ error: 'Motif requis pour un refus' })
+
+  const all = readData('propositions.json')
+  const idx = all.findIndex(p => p.id === req.params.id && p.dem_id === req.portailDem)
+  if (idx === -1) return res.status(404).json({ error: 'Proposition introuvable' })
+  if (all[idx].statut !== 'en_attente') return res.status(409).json({ error: 'Cette proposition est deja traitee' })
+
+  // Verifier le delai
+  if (all[idx].deadline && new Date(all[idx].deadline) < new Date()) {
+    all[idx].statut = 'expiree'
+    writeData('propositions.json', all)
+    return res.status(410).json({ error: 'Delai depasse - la proposition a expire' })
+  }
+
+  all[idx].statut = reponse
+  all[idx].motif_refus = motif || null
+  all[idx].repondu_le = new Date().toISOString()
+  all[idx].repondu_par = 'candidat_portail'
+  writeData('propositions.json', all)
+
+  // Trace parcours
+  const demandeurs = readData('demandeurs.json')
+  const di = demandeurs.findIndex(d => d.id === req.portailDem)
+  if (di !== -1) {
+    if (!demandeurs[di].parcours) demandeurs[di].parcours = []
+    demandeurs[di].parcours.push({
+      date: nowDate(),
+      type: 'Reponse proposition',
+      detail: reponse === 'acceptee' ? 'Proposition acceptee via portail' : 'Refus via portail - ' + motif
+    })
+    writeData('demandeurs.json', demandeurs)
+  }
+  addLog(null, 'PORTAIL_PROPOSITION_' + reponse.toUpperCase(), 'prop: ' + all[idx].id)
+  res.json({ ok: true, proposition: all[idx] })
+})
+
+// Cote agent : creer une proposition pour un demandeur (apres CAL favorable)
+app.post('/api/propositions', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const { dem_id, logement_id, decision_cal_id } = req.body || {}
+  if (!dem_id || !logement_id) return res.status(400).json({ error: 'dem_id et logement_id requis' })
+  const all = readData('propositions.json')
+  const deadline = new Date(); deadline.setDate(deadline.getDate() + 10)
+  const prop = {
+    id: 'PROP' + Date.now() + randomBytes(3).toString('hex'),
+    dem_id, logement_id, decision_cal_id: decision_cal_id || null,
+    date_proposition: new Date().toISOString(),
+    deadline: deadline.toISOString(),
+    statut: 'en_attente',
+    cree_par: req.user.prenom + ' ' + req.user.nom
+  }
+  all.push(prop)
+  writeData('propositions.json', all)
+  addLog(req.user, 'PROPOSITION_CREEE', prop.id + ' dem: ' + dem_id)
+  res.json(prop)
+})
+
+// Liste cote agent
+app.get('/api/propositions', requireAuth, (req, res) => {
+  const all = readData('propositions.json')
+  res.json(all)
+})
+
+// --- RENOUVELLEMENT ---
+
+app.post('/api/portail/renouveler', requirePortailAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const idx = demandeurs.findIndex(d => d.id === req.portailDem)
+  if (idx === -1) return res.status(404).json({ error: 'Dossier introuvable' })
+
+  const now = new Date()
+  demandeurs[idx].dernier_renouvellement = now.toISOString().substring(0, 10)
+  if (!demandeurs[idx].parcours) demandeurs[idx].parcours = []
+  demandeurs[idx].parcours.push({
+    date: nowDate(),
+    type: 'Renouvellement',
+    detail: 'Renouvellement de la demande via portail candidat'
+  })
+  writeData('demandeurs.json', demandeurs)
+  addLog(null, 'PORTAIL_RENOUVELLEMENT', 'dem: ' + req.portailDem)
+
+  const limite = new Date(now); limite.setFullYear(limite.getFullYear() + 1)
+  res.json({
+    ok: true,
+    renouvelle_le: now.toISOString().substring(0, 10),
+    prochaine_echeance: limite.toISOString().substring(0, 10)
+  })
+})
+
+// --- DEFINITION DATE DE NAISSANCE (premiere connexion en mode compat) ---
+
+app.post('/api/portail/date-naissance', requirePortailAuth, (req, res) => {
+  const { date_naissance } = req.body || {}
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date_naissance || '')) return res.status(400).json({ error: 'Format attendu : YYYY-MM-DD' })
+  const demandeurs = readData('demandeurs.json')
+  const idx = demandeurs.findIndex(d => d.id === req.portailDem)
+  if (idx === -1) return res.status(404).json({ error: 'Dossier introuvable' })
+  if (demandeurs[idx].date_naissance) {
+    // Une fois definie, seul un agent peut la modifier (securite)
+    return res.status(403).json({ error: 'Date de naissance deja definie - contactez le service habitat pour toute modification' })
+  }
+  demandeurs[idx].date_naissance = date_naissance
+  writeData('demandeurs.json', demandeurs)
+  addLog(null, 'PORTAIL_DOB_SET', 'dem: ' + req.portailDem)
+  res.json({ ok: true })
+})
+
+// --- ATTESTATION OFFICIELLE PDF (HTML imprimable) ---
+
+app.get('/api/portail/attestation', requirePortailAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const dem = demandeurs.find(d => d.id === req.portailDem)
+  if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
+
+  const users = readData('users.json')
+  const directeur = users.find(u => u.role === 'directeur' && u.actif) || { nom: '[Directeur]', prenom: '' }
+
+  const now = new Date()
+  const dateFr = now.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })
+  const refAttest = 'ATT-' + dem.nud + '-' + now.toISOString().substring(0, 10).replace(/-/g, '')
+  const hash = createHash('sha256').update(refAttest + '|' + dem.id + '|' + now.toISOString(), 'utf8').digest('hex').substring(0, 24)
+
+  const html = `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Attestation demande de logement - ${dem.nud}</title>
+<style>
+  body { font-family: 'Helvetica Neue', Arial, sans-serif; color: #111; max-width: 800px; margin: 40px auto; padding: 0 30px; line-height: 1.6; }
+  .entete { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #1e3a8a; padding-bottom: 16px; margin-bottom: 30px; }
+  .logo { width: 80px; height: 80px; background: linear-gradient(135deg,#1e3a8a,#E05C2A); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 800; font-size: 28px; font-family: 'Helvetica Neue', Arial; }
+  .titre-ville { color: #1e3a8a; font-size: 20pt; font-weight: 800; margin: 0; }
+  .sous-titre { color: #64748b; font-size: 10pt; margin: 4px 0 0; }
+  h1 { text-align: center; color: #1e3a8a; font-size: 22pt; margin: 30px 0 20px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .ref { text-align: right; font-size: 10pt; color: #64748b; font-family: monospace; }
+  .corps { font-size: 12pt; text-align: justify; }
+  .info-box { background: #f1f5f9; border-left: 4px solid #1e3a8a; padding: 14px 18px; margin: 20px 0; border-radius: 4px; }
+  .info-box dt { font-weight: 700; display: inline-block; min-width: 180px; color: #1e3a8a; }
+  .signature-zone { margin-top: 60px; display: flex; justify-content: space-between; align-items: flex-end; }
+  .cachet { width: 160px; height: 160px; border: 3px solid #E05C2A; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #E05C2A; font-family: 'Helvetica Neue', Arial; font-weight: 700; text-align: center; font-size: 9pt; line-height: 1.2; transform: rotate(-8deg); }
+  .cachet .ville { font-size: 11pt; margin-bottom: 2px; }
+  .cachet .type { font-size: 8pt; margin-top: 4px; }
+  .sig { width: 260px; text-align: center; }
+  .sig .nom { font-weight: 700; color: #111; margin-top: 36px; border-top: 1px solid #94A3B8; padding-top: 6px; }
+  .footer { margin-top: 50px; font-size: 9pt; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 12px; line-height: 1.5; }
+  .hash { font-family: monospace; font-size: 8pt; color: #94a3b8; word-break: break-all; }
+  @media print { body { margin: 0; } .no-print { display: none; } }
+</style>
+</head>
+<body>
+<div class="no-print" style="text-align:right;margin-bottom:10px;">
+  <button onclick="window.print()" style="padding:8px 16px;background:#1e3a8a;color:#fff;border:none;border-radius:6px;cursor:pointer;">Telecharger PDF</button>
+</div>
+
+<div class="entete">
+  <div style="display:flex;gap:14px;align-items:center;">
+    <div class="logo">SD</div>
+    <div>
+      <h2 class="titre-ville">Mairie de Saint-Denis</h2>
+      <div class="sous-titre">Commune chef-lieu - La Reunion (974)<br>Service Habitat &middot; 2 rue de Paris, 97400 Saint-Denis</div>
+    </div>
+  </div>
+  <div class="ref">
+    Reference :<br><b>${refAttest}</b><br>
+    Date : ${dateFr}
+  </div>
+</div>
+
+<h1>Attestation de demande de logement social</h1>
+
+<div class="corps">
+<p>Le Service Habitat de la Mairie de Saint-Denis de la Reunion certifie que&nbsp;:</p>
+
+<div class="info-box">
+<dt>Identite :</dt> Monsieur / Madame <b>${escapeHtml(dem.prenom || '')} ${escapeHtml(dem.nom || '')}</b><br>
+<dt>Numero Unique (NUD) :</dt> <b>${escapeHtml(dem.nud || '')}</b><br>
+<dt>Date de depot :</dt> ${escapeHtml(dem.date_depot || (dem.parcours && dem.parcours[0] && dem.parcours[0].date) || '-')}<br>
+<dt>Anciennete :</dt> <b>${dem.anc || 0} mois</b><br>
+<dt>Typologie demandee :</dt> ${escapeHtml(dem.typ_v || '-')}<br>
+<dt>Composition du foyer :</dt> ${escapeHtml(dem.compo || '-')}
+</div>
+
+<p>a <b>depose une demande de logement social aupres de la Mairie de Saint-Denis de la Reunion</b> et que cette demande est actuellement <b>en cours d instruction</b>, enregistree dans le systeme Logivia et transmise au Systeme National d Enregistrement conformement a la reglementation en vigueur.</p>
+
+<p>La presente attestation est delivree a l interesse(e) pour valoir ce que de droit.</p>
+
+<p style="margin-top:30px;">Fait a Saint-Denis, le ${dateFr}.</p>
+</div>
+
+<div class="signature-zone">
+  <div class="cachet">
+    <div>MAIRIE DE</div>
+    <div class="ville">SAINT-DENIS</div>
+    <div>LA REUNION (974)</div>
+    <div class="type">SERVICE HABITAT</div>
+  </div>
+  <div class="sig">
+    Pour le Maire et par delegation,<br>
+    Le Directeur du Service Habitat
+    <div class="nom">${escapeHtml((directeur.prenom || '') + ' ' + (directeur.nom || ''))}</div>
+  </div>
+</div>
+
+<div class="footer">
+  Document officiel delivre par la Mairie de Saint-Denis de la Reunion - Service Habitat.<br>
+  Cette attestation est authentifiee par un identifiant unique : <span class="hash">${hash}</span><br>
+  Sa validite peut etre verifiee aupres du service emetteur (0262 40 01 67) ou sur le portail Logivia.
+</div>
+
+</body>
+</html>`
+  res.type('html').send(html)
+})
+
+// --- COMPAT : ancien endpoint dossier public (lecture seule, pas de pieces ni propositions) ---
+// Utilise par les anciens liens. Redirige vers le nouveau flow d auth.
+app.get('/api/portail/dossier/:nud', (req, res) => {
+  // Conserve pour compat descendante : retourne un dossier minimal sans auth DOB
+  const dem = findDemByNud(req.params.nud)
+  if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
+  const audiences = readData('audiences.json')
+  const decisions = readData('decisions_cal.json')
+
+  const audPubliques = audiences
+    .filter(a => a.dem_id === dem.id)
+    .map(a => ({ date: a.date_audience, type: 'Audience elu', favorable: a.favorable, statut: a.statut }))
+  const decPubliques = decisions
+    .filter(d => (d.candidats || []).some(c => c.dem_id === dem.id))
+    .map(d => {
+      const c = d.candidats.find(x => x.dem_id === dem.id)
+      return { date: d.date_cal, logement_ref: d.logement_ref, decision: c ? c.decision : 'Examine' }
+    })
+
+  let etape = 1, statut = 'En cours d instruction'
+  if (dem.statut === 'attribue') { etape = 4; statut = 'Logement attribue' }
+  else if (audPubliques.some(a => a.statut === 'Attribue')) { etape = 4; statut = 'Attribution en cours' }
+  else if (audPubliques.some(a => a.favorable)) { etape = 3; statut = 'Proposition attendue' }
+  else if (audPubliques.length > 0) { etape = 2; statut = 'Suivi actif' }
+
   res.json({
     nud: dem.nud,
     prenom: dem.prenom,
@@ -2201,15 +2774,15 @@ app.get('/api/portail/dossier/:nud', (req, res) => {
     statut,
     etape,
     pieces_ok: !!dem.pieces,
-    historique,
-    actions_requises: dem.pieces ? [] : ['Pieces justificatives incompletes - contactez le service habitat'],
-    contact: {
-      service: 'Service Habitat - Mairie de Saint-Denis',
-      adresse: '2 place du Caquet, 93200 Saint-Denis',
-      tel: '01 49 33 64 00',
-      horaires: 'Lun-Ven 8h30-12h / 13h30-17h',
-      email: 'habitat@ville-saint-denis.fr'
-    }
+    historique: [
+      ...(dem.parcours || []).map(p => ({ date: p.date, type: p.type })),
+      ...audPubliques.map(a => ({ date: a.date, type: 'Audience elu - ' + (a.favorable ? 'Favorable' : 'Neutre') })),
+      ...decPubliques.map(d => ({ date: d.date, type: 'Commission CAL - ' + d.decision }))
+    ],
+    actions_requises: dem.pieces ? [] : ['Pieces justificatives incompletes - connectez-vous au portail avec votre date de naissance pour les deposer'],
+    contact: CONTACT_974,
+    deprecated: true,
+    message: 'Nouveau portail disponible avec authentification renforcee (NUD + date de naissance)'
   })
 })
 

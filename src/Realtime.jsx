@@ -709,4 +709,38 @@ export function NotificationsPanel({ onClose, onNavigate }) {
             key={n.id}
             onClick={() => {
               marquerLu(n.id)
-              if (onNaviga
+              if (onNavigate && n.link) onNavigate(n.link)
+              if (onClose) onClose()
+            }}
+            style={{
+              padding: '10px 14px',
+              borderBottom: '1px solid #f1f5f9',
+              cursor: 'pointer',
+              background: n.lu ? 'white' : '#f8fafc',
+              display: 'flex', flexDirection: 'column', gap: 4
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontWeight: n.lu ? 500 : 700, color: '#1e293b', fontSize: 13 }}>
+                {n.titre || n.type || 'Notification'}
+              </span>
+              {!n.lu && (
+                <span style={{ background: '#ef4444', color: 'white', fontSize: 9, padding: '1px 6px', borderRadius: 4 }}>
+                  NEW
+                </span>
+              )}
+            </div>
+            {n.message && (
+              <div style={{ fontSize: 12, color: '#475569' }}>{n.message}</div>
+            )}
+            {n.date && (
+              <div style={{ fontSize: 10, color: '#94a3b8' }}>
+                {new Date(n.date).toLocaleString('fr-FR')}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}

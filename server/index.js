@@ -281,14 +281,72 @@ function checkLoginLimit(ip) {
 
 const app = express()
 
+// Security headers (helmet-like, zero dep)
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+  res.setHeader('X-XSS-Protection', '0')
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), payment=(), usb=()')
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin')
+  // CSP : permissif en dev (vite HMR), strict en prod
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Content-Security-Policy',
+      "default-src 'self'; " +
+      "script-src 'self' 'unsafe-inline'; " +
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+      "font-src 'self' https://fonts.gstatic.com data:; " +
+      "img-src 'self' data: blob:; " +
+      "connect-src 'self'; " +
+      "frame-ancestors 'self'; " +
+      "base-uri 'self'; " +
+      "form-action 'self'; " +
+      "object-src 'none'"
+    )
+  }
   next()
 })
 
 app.use(cors({ origin: true, credentials: true }))
 app.use(express.json({ limit: '10mb' }))
+
+// ============================================================
+// RATE LIMITING (in-memory, sliding window)
+// ============================================================
+
+function makeRateLimiter(maxHits, windowMs, message) {
+  const buckets = new Map()
+  // auto-cleanup
+  setInterval(() => {
+    const cutoff = Date.now() - windowMs
+    for (const [ip, hits] of buckets) {
+      const kept = hits.filter(t => t > cutoff)
+      if (kept.length === 0) buckets.delete(ip)
+      else buckets.set(ip, kept)
+    }
+  }, windowMs).unref?.()
+
+  return function rateLimit(req, res, next) {
+    const ip = (req.headers['x-forwarded-for'] || req.ip || req.socket.remoteAddress || 'unknown').toString().split(',')[0].trim()
+    const now = Date.now()
+    const hits = (buckets.get(ip) || []).filter(t => now - t < windowMs)
+    if (hits.length >= maxHits) {
+      res.setHeader('Retry-After', Math.ceil(windowMs / 1000))
+      return res.status(429).json({ error: message || 'Trop de requetes. Reessayez dans quelques minutes.' })
+    }
+    hits.push(now)
+    buckets.set(ip, hits)
+    next()
+  }
+}
+
+// Limiteurs reutilisables
+const rlLoginTight = makeRateLimiter(10, 15 * 60 * 1000, 'Trop de tentatives de connexion. Reessayez dans 15 min.')
+const rlPortailAuth = makeRateLimiter(8, 10 * 60 * 1000, 'Trop de tentatives. Reessayez dans 10 min.')
+const rlUpload = makeRateLimiter(30, 60 * 60 * 1000, 'Trop d uploads. Reessayez dans 1 heure.')
+const rlRgpdReq = makeRateLimiter(5, 24 * 60 * 60 * 1000, 'Vous avez deja soumis une demande RGPD aujourd hui.')
 
 // Production: servir React
 if (existsSync(join(DIST, 'index.html'))) {
@@ -342,7 +400,7 @@ app.get('/api/ping', (req, res) => {
 // AUTH
 // ============================================================
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', rlLoginTight, (req, res) => {
   const ip = req.ip || 'unknown'
   if (!checkLoginLimit(ip)) {
     return res.status(429).json({ error: 'Trop de tentatives. Attendez 15 minutes.' })
@@ -2222,7 +2280,7 @@ function requirePortailAuth(req, res, next) {
 }
 
 // Auth portail : NUD + date de naissance
-app.post('/api/portail/auth', (req, res) => {
+app.post('/api/portail/auth', rlPortailAuth, (req, res) => {
   const { nud, date_naissance } = req.body || {}
   if (!nud) return res.status(400).json({ error: 'NUD requis' })
   const dem = findDemByNud(nud)
@@ -2375,7 +2433,7 @@ app.get('/api/portail/pieces', requirePortailAuth, (req, res) => {
   })
 })
 
-app.post('/api/portail/pieces/upload', requirePortailAuth, (req, res) => {
+app.post('/api/portail/pieces/upload', rlUpload, requirePortailAuth, (req, res) => {
   const { code, filename, mimetype, contenu_base64 } = req.body || {}
   if (!code) return res.status(400).json({ error: 'Code piece requis' })
   if (!PIECES_ATTENDUES.find(p => p.code === code)) return res.status(400).json({ error: 'Type de piece inconnu' })
@@ -2738,6 +2796,136 @@ app.get('/api/portail/attestation', requirePortailAuth, (req, res) => {
 </body>
 </html>`
   res.type('html').send(html)
+})
+
+// ============================================================
+// RGPD PORTAIL : droit d acces (art. 15), demande effacement/rectification (art. 16/17/18)
+// ============================================================
+
+// Art. 15 : export complet des donnees du candidat (JSON)
+app.get('/api/portail/mes-donnees', requirePortailAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const audiences = readData('audiences.json')
+  const decisions = readData('decisions_cal.json')
+  const propositions = readData('propositions.json')
+  const pieces = readData('pieces_justificatives.json')
+  const rgpdReqs = readData('rgpd_demandes.json')
+
+  const dem = demandeurs.find(d => d.id === req.portailDem)
+  if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
+
+  const mesAudiences = audiences.filter(a => a.dem_id === dem.id)
+  const mesDecisions = decisions.filter(d => (d.candidats || []).some(c => c.dem_id === dem.id))
+  const mesPropositions = propositions.filter(p => p.dem_id === dem.id)
+  const mesPieces = pieces.filter(p => p.dem_id === dem.id).map(p => {
+    const { contenu_base64, ...rest } = p  // on n envoie pas le contenu binaire
+    return rest
+  })
+  const mesDemandesRgpd = rgpdReqs.filter(r => r.dem_id === dem.id)
+
+  addLog(null, 'RGPD_EXPORT_DONNEES', 'dem: ' + dem.id)
+
+  const out = {
+    genere_le: new Date().toISOString(),
+    reference: 'EXPORT-RGPD-' + dem.nud + '-' + Date.now(),
+    mention_art15: 'Export fourni au titre de l article 15 du RGPD (droit d acces). Durees de conservation : voir politique de confidentialite du portail.',
+    demandeur: dem,
+    audiences: mesAudiences,
+    decisions_cal: mesDecisions,
+    propositions: mesPropositions,
+    pieces_justificatives: mesPieces,
+    demandes_rgpd_anterieures: mesDemandesRgpd
+  }
+
+  res.setHeader('Content-Disposition', 'attachment; filename="mes-donnees-' + dem.nud + '.json"')
+  res.type('application/json').send(JSON.stringify(out, null, 2))
+})
+
+// Art. 16/17/18/21 : soumission d une demande d exercice de droit
+app.post('/api/portail/demande-rgpd', rlRgpdReq, requirePortailAuth, (req, res) => {
+  const { droit, message } = req.body || {}
+  const DROITS_VALIDES = ['acces', 'rectification', 'effacement', 'limitation', 'opposition', 'portabilite']
+  if (!DROITS_VALIDES.includes(droit)) {
+    return res.status(400).json({ error: 'Droit invalide. Valeurs : ' + DROITS_VALIDES.join(', ') })
+  }
+  if (!message || String(message).trim().length < 10) {
+    return res.status(400).json({ error: 'Merci de preciser votre demande (10 caracteres min).' })
+  }
+  if (String(message).length > 2000) {
+    return res.status(400).json({ error: 'Message trop long (2000 caracteres max).' })
+  }
+
+  const all = readData('rgpd_demandes.json')
+  const demande = {
+    id: 'RGPD' + Date.now() + randomBytes(3).toString('hex'),
+    dem_id: req.portailDem,
+    droit,
+    message: String(message).trim(),
+    soumise_le: new Date().toISOString(),
+    statut: 'recue',
+    delai_legal: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().substring(0, 10),
+    reponse: null,
+    traitee_le: null,
+    traitee_par: null
+  }
+  all.push(demande)
+  writeData('rgpd_demandes.json', all)
+  addLog(null, 'RGPD_DEMANDE_RECUE', 'dem: ' + req.portailDem + ' droit: ' + droit)
+
+  // Notification au DPO
+  try { tgSend('[RGPD] Nouvelle demande ' + droit + ' - dem ' + req.portailDem + ' - ref ' + demande.id).catch(() => {}) } catch (e) {}
+
+  res.json({
+    ok: true,
+    reference: demande.id,
+    delai_legal: demande.delai_legal,
+    message: 'Votre demande a bien ete recue. Vous recevrez une reponse sous 30 jours maximum, conformement a l article 12.3 du RGPD.'
+  })
+})
+
+// Liste des demandes RGPD du candidat
+app.get('/api/portail/mes-demandes-rgpd', requirePortailAuth, (req, res) => {
+  const all = readData('rgpd_demandes.json')
+  const miennes = all.filter(r => r.dem_id === req.portailDem).sort((a, b) => (b.soumise_le || '').localeCompare(a.soumise_le || ''))
+  res.json(miennes)
+})
+
+// ============================================================
+// RGPD ADMIN : cote DPO / directeur
+// ============================================================
+
+app.get('/api/rgpd/demandes', requireAuth, requireRole('directeur'), (req, res) => {
+  const all = readData('rgpd_demandes.json').sort((a, b) => (b.soumise_le || '').localeCompare(a.soumise_le || ''))
+  const demandeurs = readData('demandeurs.json')
+  const enrichies = all.map(r => {
+    const d = demandeurs.find(x => x.id === r.dem_id)
+    return {
+      ...r,
+      demandeur_nud: d ? d.nud : null,
+      demandeur_nom: d ? (d.prenom + ' ' + d.nom) : null
+    }
+  })
+  res.json(enrichies)
+})
+
+app.post('/api/rgpd/demandes/:id/repondre', requireAuth, requireRole('directeur'), (req, res) => {
+  const { reponse, statut } = req.body || {}
+  const STATUTS = ['accordee', 'refusee', 'partiellement_accordee']
+  if (!STATUTS.includes(statut)) return res.status(400).json({ error: 'Statut invalide' })
+  if (!reponse || reponse.length < 10) return res.status(400).json({ error: 'Reponse requise (10 car. min)' })
+
+  const all = readData('rgpd_demandes.json')
+  const idx = all.findIndex(r => r.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Demande introuvable' })
+
+  all[idx].reponse = reponse
+  all[idx].statut = statut
+  all[idx].traitee_le = new Date().toISOString()
+  all[idx].traitee_par = (req.user.prenom || '') + ' ' + (req.user.nom || '')
+  writeData('rgpd_demandes.json', all)
+  addLog(req.user, 'RGPD_DEMANDE_TRAITEE', all[idx].id + ' statut: ' + statut)
+
+  res.json(all[idx])
 })
 
 // --- COMPAT : ancien endpoint dossier public (lecture seule, pas de pieces ni propositions) ---
@@ -4828,6 +5016,182 @@ if (existsSync(join(DIST, 'index.html'))) {
     }
   })
 }
+
+// ============================================================
+// PURGE RGPD : retention / anonymisation automatique (cron interne)
+// ============================================================
+
+const RETENTION = {
+  AUDIT_ANS: 5,
+  LOGS_MOIS: 12,
+  DEMANDES_RADIEES_MOIS: 12,
+  DEMANDES_ATTRIBUEES_ANS: 5,
+  RGPD_DEMANDES_ANS: 3,
+  PIECES_AP_TRAITEMENT_MOIS: 12,
+  COMPTE_INACTIF_DESACTIVATION_MOIS: 6,
+  COMPTE_INACTIF_SUPPRESSION_MOIS: 24
+}
+
+function daysAgo(n) { return Date.now() - n * 86400000 }
+function parseDateIso(s) {
+  if (!s) return null
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? null : d.getTime()
+}
+
+function purgerRetention() {
+  const rapport = {
+    date: new Date().toISOString(),
+    audit_supprimes: 0,
+    logs_supprimes: 0,
+    demandes_anonymisees: 0,
+    rgpd_demandes_supprimees: 0,
+    pieces_supprimees: 0,
+    comptes_desactives: 0,
+    comptes_supprimes: 0
+  }
+
+  try {
+    // 1. Audit > 5 ans
+    const audit = readData('audit.json')
+    const cutoffAudit = daysAgo(RETENTION.AUDIT_ANS * 365)
+    const auditKeep = audit.filter(a => (parseDateIso(a.date) || Date.now()) > cutoffAudit)
+    rapport.audit_supprimes = audit.length - auditKeep.length
+    if (rapport.audit_supprimes > 0) writeData('audit.json', auditKeep)
+
+    // 2. Logs > 12 mois
+    const logs = readData('logs.json')
+    const cutoffLogs = daysAgo(RETENTION.LOGS_MOIS * 30)
+    const logsKeep = logs.filter(l => (parseDateIso(l.date) || Date.now()) > cutoffLogs)
+    rapport.logs_supprimes = logs.length - logsKeep.length
+    if (rapport.logs_supprimes > 0) writeData('logs.json', logsKeep)
+
+    // 3. Anonymisation des demandes attribuees > 5 ans
+    const demandeurs = readData('demandeurs.json')
+    const cutoffAttrib = daysAgo(RETENTION.DEMANDES_ATTRIBUEES_ANS * 365)
+    let changedDem = false
+    demandeurs.forEach((d, i) => {
+      if (d.statut === 'attribue' && !d.anonymise && d.date_attribution) {
+        if ((parseDateIso(d.date_attribution) || Date.now()) < cutoffAttrib) {
+          demandeurs[i] = {
+            id: d.id,
+            nud: 'ANON-' + createHash('sha256').update(d.nud || '', 'utf8').digest('hex').substring(0, 12),
+            nom: '[ANONYMISE]',
+            prenom: '',
+            date_naissance: null,
+            adresse: null,
+            tel: null,
+            email: null,
+            anc: d.anc,
+            adultes: d.adultes,
+            enfants: d.enfants,
+            typ_v: d.typ_v,
+            secteurs: d.secteurs,
+            statut: 'anonymise',
+            date_attribution: d.date_attribution,
+            anonymise: true,
+            anonymise_le: new Date().toISOString(),
+            parcours: []
+          }
+          rapport.demandes_anonymisees++
+          changedDem = true
+        }
+      }
+    })
+    if (changedDem) writeData('demandeurs.json', demandeurs)
+
+    // 4. Demandes RGPD traitees > 3 ans
+    const rgpd = readData('rgpd_demandes.json')
+    const cutoffRgpd = daysAgo(RETENTION.RGPD_DEMANDES_ANS * 365)
+    const rgpdKeep = rgpd.filter(r => {
+      if (r.statut === 'recue') return true
+      const date = parseDateIso(r.traitee_le || r.soumise_le) || Date.now()
+      return date > cutoffRgpd
+    })
+    rapport.rgpd_demandes_supprimees = rgpd.length - rgpdKeep.length
+    if (rapport.rgpd_demandes_supprimees > 0) writeData('rgpd_demandes.json', rgpdKeep)
+
+    // 5. Pieces d une demande attribuee ou radiee depuis > 12 mois
+    const pieces = readData('pieces_justificatives.json')
+    const cutoffPieces = daysAgo(RETENTION.PIECES_AP_TRAITEMENT_MOIS * 30)
+    const piecesKeep = []
+    for (const p of pieces) {
+      const dem = demandeurs.find(d => d.id === p.dem_id)
+      if (!dem) continue  // orpheline : drop
+      if (['attribue', 'anonymise', 'radie'].includes(dem.statut)) {
+        const refDate = parseDateIso(dem.date_attribution || dem.date_radiation) || Date.now()
+        if (refDate < cutoffPieces) {
+          // purge fichier physique
+          try {
+            const filePath = join(DATA, 'pieces', p.dem_id, p.stored_name)
+            if (existsSync(filePath)) unlinkSync(filePath)
+          } catch (e) {}
+          rapport.pieces_supprimees++
+          continue
+        }
+      }
+      piecesKeep.push(p)
+    }
+    if (rapport.pieces_supprimees > 0) writeData('pieces_justificatives.json', piecesKeep)
+
+    // 6. Comptes inactifs
+    const users = readData('users.json')
+    const cutoffDesactiv = daysAgo(RETENTION.COMPTE_INACTIF_DESACTIVATION_MOIS * 30)
+    const cutoffSupp = daysAgo(RETENTION.COMPTE_INACTIF_SUPPRESSION_MOIS * 30)
+    const usersKeep = []
+    let changedUsers = false
+    for (const u of users) {
+      const last = parseDateIso(u.last_login || u.cree_le) || Date.now()
+      if (last < cutoffSupp && !u.actif) {
+        rapport.comptes_supprimes++
+        changedUsers = true
+        continue
+      }
+      if (last < cutoffDesactiv && u.actif) {
+        u.actif = false
+        u.desactive_le = new Date().toISOString()
+        u.motif_desactivation = 'Inactivite > 6 mois (RGPD)'
+        rapport.comptes_desactives++
+        changedUsers = true
+      }
+      usersKeep.push(u)
+    }
+    if (changedUsers) writeData('users.json', usersKeep)
+
+    // 7. Nettoyage sessions portail expirees (deja fait ailleurs, mais redondance sans cout)
+    try { nettoyerSessionsExpirees() } catch (e) {}
+
+    // 8. Consigner le rapport dans audit
+    try { addLog(null, 'RGPD_PURGE', JSON.stringify(rapport)) } catch (e) {}
+
+    console.log('[RGPD-purge] ' + JSON.stringify(rapport))
+  } catch (err) {
+    console.error('[RGPD-purge] Erreur:', err.message)
+  }
+
+  return rapport
+}
+
+// Endpoint admin pour declencher une purge manuelle
+app.post('/api/rgpd/purger', requireAuth, requireRole('directeur'), (req, res) => {
+  const rapport = purgerRetention()
+  res.json(rapport)
+})
+
+// Endpoint cron externe (protege par CRON_SECRET)
+app.post('/api/rgpd/cron-purge', (req, res) => {
+  const secret = req.headers['x-cron-secret'] || (req.query && req.query.secret)
+  if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'cron secret invalide' })
+  }
+  const rapport = purgerRetention()
+  res.json(rapport)
+})
+
+// Demarrage d une purge automatique quotidienne en interne (leger, ok pour 1 seul process)
+setInterval(purgerRetention, 24 * 60 * 60 * 1000).unref?.()
+// Premier passage 5 min apres le demarrage (evite de bloquer le boot)
+setTimeout(purgerRetention, 5 * 60 * 1000).unref?.()
 
 // ============================================================
 // DEMARRAGE

@@ -3057,6 +3057,12 @@ function PortailCandidatPage() {
   // Proposition action state
   const [propMotif, setPropMotif] = useState({})
 
+  // RGPD state
+  const [rgpdDemandes, setRgpdDemandes] = useState([])
+  const [rgpdDroit, setRgpdDroit] = useState('acces')
+  const [rgpdMessage, setRgpdMessage] = useState('')
+  const [showPolitique, setShowPolitique] = useState(false)
+
   const ETAPES = [
     { n: 1, label: 'Reçu' },
     { n: 2, label: 'En étude' },
@@ -3200,6 +3206,37 @@ function PortailCandidatPage() {
     window.open(url, '_blank')
   }
 
+  const telechargerMesDonnees = () => {
+    const url = '/api/portail/mes-donnees?token=' + encodeURIComponent(token)
+    window.open(url, '_blank')
+  }
+
+  const loadRgpdDemandes = async () => {
+    try {
+      const r = await fetch('/api/portail/mes-demandes-rgpd', { headers: { 'x-portail-token': token } })
+      if (r.ok) setRgpdDemandes(await r.json())
+    } catch {}
+  }
+
+  const soumettreRgpd = async (e) => {
+    if (e) e.preventDefault()
+    if (!rgpdDroit || !rgpdMessage.trim() || rgpdMessage.trim().length < 10) {
+      showFlash('Precisez votre demande (10 caracteres min)')
+      return
+    }
+    try {
+      const r = await fetch('/api/portail/demande-rgpd', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ droit: rgpdDroit, message: rgpdMessage.trim() })
+      })
+      const d = await r.json()
+      if (!r.ok) { showFlash(d.error || 'Erreur'); return }
+      showFlash('Demande enregistree - reference ' + d.reference)
+      setRgpdMessage(''); setRgpdDroit('acces')
+      loadRgpdDemandes()
+    } catch { showFlash('Erreur') }
+  }
+
   const telechargerPiece = (id) => {
     const url = '/api/portail/pieces/' + id + '/fichier?token=' + encodeURIComponent(token)
     window.open(url, '_blank')
@@ -3313,6 +3350,7 @@ function PortailCandidatPage() {
                   Renouvellement {dossier.renouvellement && dossier.renouvellement.urgent && <span style={{ marginLeft: 6, color: '#FCA5A5' }}>!</span>}
                 </button>
                 <button onClick={() => setTab('attestation')} style={tabBtn(tab === 'attestation')}>Attestation</button>
+                <button onClick={() => { setTab('rgpd'); loadRgpdDemandes() }} style={tabBtn(tab === 'rgpd')}>Mes droits RGPD</button>
               </div>
 
               {/* Suivi */}
@@ -3527,6 +3565,84 @@ function PortailCandidatPage() {
                     Télécharger l'attestation (PDF)
                   </button>
                 </div>
+              )}
+
+              {/* RGPD */}
+              {tab === 'rgpd' && (
+                <>
+                  <div style={card}>
+                    <div style={cardTitle}>Mes droits RGPD</div>
+                    <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, lineHeight: 1.7, marginBottom: 14 }}>
+                      Le Règlement Général sur la Protection des Données (RGPD) vous donne le droit d'accéder à vos données, de les rectifier, les effacer ou vous opposer à leur traitement. Le service Habitat vous répondra sous <b>30 jours maximum</b>.
+                    </div>
+                    <button onClick={telechargerMesDonnees}
+                      style={{ width: '100%', padding: '12px', borderRadius: 10, border: '1.5px solid ' + C.accent, background: 'transparent', color: C.accent, cursor: 'pointer', fontFamily: Fh, fontSize: 13, fontWeight: 700, marginBottom: 10 }}>
+                      Exporter toutes mes données (JSON)
+                    </button>
+                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center' }}>
+                      Art. 15 — droit d'accès · export instantané
+                    </div>
+                  </div>
+
+                  <div style={card}>
+                    <div style={cardTitle}>Soumettre une demande</div>
+                    <form onSubmit={soumettreRgpd}>
+                      <label style={{ display: 'block', fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 6 }}>Droit exercé</label>
+                      <select value={rgpdDroit} onChange={e => setRgpdDroit(e.target.value)}
+                        style={{ width: '100%', padding: '11px 14px', borderRadius: 9, border: '1.5px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.08)', color: '#fff', fontFamily: Fb, fontSize: 13, boxSizing: 'border-box', outline: 'none', marginBottom: 12 }}>
+                        <option value="acces" style={{ color: '#000' }}>Droit d'accès (Art. 15)</option>
+                        <option value="rectification" style={{ color: '#000' }}>Droit de rectification (Art. 16)</option>
+                        <option value="effacement" style={{ color: '#000' }}>Droit à l'effacement (Art. 17)</option>
+                        <option value="limitation" style={{ color: '#000' }}>Droit à la limitation (Art. 18)</option>
+                        <option value="portabilite" style={{ color: '#000' }}>Droit à la portabilité (Art. 20)</option>
+                        <option value="opposition" style={{ color: '#000' }}>Droit d'opposition (Art. 21)</option>
+                      </select>
+                      <label style={{ display: 'block', fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 6 }}>Précisez votre demande</label>
+                      <textarea value={rgpdMessage} onChange={e => setRgpdMessage(e.target.value)} required minLength={10} maxLength={2000}
+                        placeholder="Indiquez précisément quelle donnée est concernée et le motif de votre demande"
+                        style={{ width: '100%', padding: '10px', borderRadius: 9, border: '1.5px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.06)', color: '#fff', fontFamily: Fb, fontSize: 12.5, boxSizing: 'border-box', resize: 'vertical', minHeight: 100, marginBottom: 12 }} />
+                      <button type="submit"
+                        style={{ width: '100%', padding: '11px', borderRadius: 9, border: 'none', background: C.accent, color: '#fff', cursor: 'pointer', fontFamily: Fh, fontSize: 13, fontWeight: 700 }}>
+                        Envoyer ma demande
+                      </button>
+                    </form>
+                  </div>
+
+                  {rgpdDemandes.length > 0 && (
+                    <div style={card}>
+                      <div style={cardTitle}>Historique de mes demandes</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {rgpdDemandes.map(r => (
+                          <div key={r.id} style={{ padding: '10px 12px', background: 'rgba(255,255,255,0.04)', borderRadius: 9, border: '1px solid rgba(255,255,255,0.08)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 12.5, color: '#fff', fontWeight: 600 }}>{r.droit.toUpperCase()}</div>
+                                <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.45)', marginTop: 2 }}>Soumise le {(r.soumise_le || '').substring(0, 10)} · Ref {r.id}</div>
+                              </div>
+                              <div style={{ fontSize: 10.5, padding: '3px 9px', borderRadius: 99, fontWeight: 700, background: r.statut === 'recue' ? C.amber : r.statut === 'accordee' ? C.green : r.statut === 'refusee' ? 'rgba(220,38,38,0.8)' : 'rgba(100,116,139,0.8)', color: '#fff' }}>{r.statut}</div>
+                            </div>
+                            <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.65)', marginTop: 6 }}>{r.message}</div>
+                            {r.reponse && (
+                              <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(16,185,129,0.1)', borderRadius: 7, fontSize: 11.5, color: 'rgba(255,255,255,0.8)' }}>
+                                <div style={{ fontSize: 10, color: '#6EE7B7', fontWeight: 700, marginBottom: 3 }}>RÉPONSE · {(r.traitee_le || '').substring(0, 10)}</div>
+                                {r.reponse}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 12, padding: '14px 18px', border: '1px solid rgba(255,255,255,0.08)', marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Délégué à la Protection des Données (DPO)</div>
+                    <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', lineHeight: 1.8 }}>
+                      Email : dpo@saintdenis.re<br />
+                      Courrier : DPO — Mairie de Saint-Denis — 2 rue de Paris — 97400 Saint-Denis<br />
+                      Réclamation possible auprès de la CNIL : www.cnil.fr/fr/plaintes
+                    </div>
+                  </div>
+                </>
               )}
 
               {/* Contact (toujours visible) */}

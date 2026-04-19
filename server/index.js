@@ -35,6 +35,20 @@ import {
   getAllLocks as rtGetAllLocks,
   getConnectedClientsCount as rtConnectedCount
 } from './realtime.js'
+import {
+  openDatabase,
+  readData as dbReadData,
+  readObj as dbReadObj,
+  writeData as dbWriteData,
+  backupNow as dbBackupNow,
+  listBackups as dbListBackups,
+  rotateBackups as dbRotateBackups,
+  stats as dbStats,
+  getDbPath as dbGetDbPath,
+  getBackupDir as dbGetBackupDir,
+  listFiles as dbListFiles,
+  closeDatabase as dbClose
+} from './db.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -51,6 +65,11 @@ if (!existsSync(TMP)) mkdirSync(TMP, { recursive: true })
  * Sur premier boot Railway, le Volume monte est vide. On seed depuis le repo
  * les fichiers JSON de reference (referentiels, users) et on cree les autres vides.
  * Une fois qu'un fichier existe deja dans le Volume, on ne l'ecrase JAMAIS.
+ *
+ * Note : depuis la v3.1 (migration SQLite), ces fichiers JSON servent uniquement
+ * de graine. Apres le premier boot, la source de verite est logivia.db dans le
+ * meme dossier. openDatabase() ci-dessous importera automatiquement les JSON
+ * presents si la base est vide.
  */
 if (DATA !== SEED_DATA && existsSync(SEED_DATA)) {
   try {
@@ -69,45 +88,79 @@ if (DATA !== SEED_DATA && existsSync(SEED_DATA)) {
   }
 }
 
+// Ouverture de la base SQLite (migration auto des JSON si base neuve)
+try {
+  openDatabase(DATA)
+  const s = dbStats()
+  if (s) console.log('[db] SQLite prete : ' + s.file_count + ' entree(s), ' + Math.round(s.size_bytes / 1024) + ' ko')
+} catch (e) {
+  console.error('[db] ouverture impossible : ' + e.message)
+  console.error('[db] le serveur fonctionnera en mode degrade (lecture/ecriture JSON fallback)')
+}
+
+// Fermeture propre de la base au shutdown
+process.on('SIGTERM', () => { try { dbClose() } catch (_) {} })
+process.on('SIGINT', () => { try { dbClose() } catch (_) {}; process.exit(0) })
+
 // ============================================================
 // HELPERS DATA
 // ============================================================
 
+// Depuis la v3.1, readData / readObj / writeData delegent a la base SQLite.
+// L'API reste identique : les 280 appels existants continuent de fonctionner sans modification.
+// En cas d'echec SQLite (ex : module natif non compile), fallback automatique sur les fichiers .json.
 function readData(file) {
-  const path = join(DATA, file)
   try {
-    if (!existsSync(path)) return []
-    const raw = readFileSync(path, 'utf8').trim()
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    return dbReadData(file)
   } catch (e) {
-    console.error('[readData] ' + file + ': ' + e.message)
-    return []
+    console.error('[readData/SQL] ' + file + ': ' + e.message + ' — fallback JSON')
+    const path = join(DATA, file)
+    try {
+      if (!existsSync(path)) return []
+      const raw = readFileSync(path, 'utf8').trim()
+      if (!raw) return []
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed : []
+    } catch (e2) {
+      console.error('[readData/fs] ' + file + ': ' + e2.message)
+      return []
+    }
   }
 }
 
 function readObj(file, fallback) {
-  const path = join(DATA, file)
   try {
-    if (!existsSync(path)) return fallback || {}
-    const raw = readFileSync(path, 'utf8').trim()
-    if (!raw) return fallback || {}
-    const parsed = JSON.parse(raw)
-    return typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : (fallback || {})
+    return dbReadObj(file, fallback)
   } catch (e) {
-    console.error('[readObj] ' + file + ': ' + e.message)
-    return fallback || {}
+    console.error('[readObj/SQL] ' + file + ': ' + e.message + ' — fallback JSON')
+    const path = join(DATA, file)
+    try {
+      if (!existsSync(path)) return fallback || {}
+      const raw = readFileSync(path, 'utf8').trim()
+      if (!raw) return fallback || {}
+      const parsed = JSON.parse(raw)
+      return typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : (fallback || {})
+    } catch (e2) {
+      console.error('[readObj/fs] ' + file + ': ' + e2.message)
+      return fallback || {}
+    }
   }
 }
 
 function writeData(file, data) {
   try {
-    writeFileSync(join(DATA, file), JSON.stringify(data, null, 2), 'utf8')
-    return true
+    const ok = dbWriteData(file, data)
+    if (ok) return true
+    throw new Error('dbWriteData returned false')
   } catch (e) {
-    console.error('[writeData] ' + file + ': ' + e.message)
-    return false
+    console.error('[writeData/SQL] ' + file + ': ' + e.message + ' — fallback JSON')
+    try {
+      writeFileSync(join(DATA, file), JSON.stringify(data, null, 2), 'utf8')
+      return true
+    } catch (e2) {
+      console.error('[writeData/fs] ' + file + ': ' + e2.message)
+      return false
+    }
   }
 }
 
@@ -5194,6 +5247,76 @@ setInterval(purgerRetention, 24 * 60 * 60 * 1000).unref?.()
 setTimeout(purgerRetention, 5 * 60 * 1000).unref?.()
 
 // ============================================================
+// SAUVEGARDE BASE SQLITE (quotidien + endpoint manuel)
+// ============================================================
+
+async function sauvegardeQuotidienne() {
+  try {
+    const info = await dbBackupNow()
+    const rot = dbRotateBackups(30) // garde 30 jours
+    console.log('[backup] ' + info.filename + ' (' + Math.round(info.size_bytes / 1024) + ' ko) — rotation : ' + rot.deleted + ' ancien(s) supprime(s)')
+    return { ok: true, backup: info, rotation: rot }
+  } catch (e) {
+    console.error('[backup] erreur : ' + e.message)
+    return { ok: false, error: e.message }
+  }
+}
+
+// Endpoint : déclencher une sauvegarde à la demande (directeur)
+app.post('/api/admin/backup-now', requireAuth, requireRole('directeur'), async (req, res) => {
+  const r = await sauvegardeQuotidienne()
+  if (!r.ok) return res.status(500).json(r)
+  res.json(r)
+})
+
+// Endpoint : lister les sauvegardes
+app.get('/api/admin/backups', requireAuth, requireRole('directeur'), (req, res) => {
+  res.json({
+    db: dbStats(),
+    backups: dbListBackups(),
+    entries: dbListFiles()
+  })
+})
+
+// Endpoint : télécharger une sauvegarde spécifique
+app.get('/api/admin/backups/:filename', requireAuth, requireRole('directeur'), (req, res) => {
+  const safe = /^logivia-\d{4}-\d{2}-\d{2}\.db$/.test(req.params.filename)
+  if (!safe) return res.status(400).json({ error: 'nom de fichier invalide' })
+  const p = join(dbGetBackupDir(), req.params.filename)
+  if (!existsSync(p)) return res.status(404).json({ error: 'introuvable' })
+  res.setHeader('Content-Type', 'application/octet-stream')
+  res.setHeader('Content-Disposition', 'attachment; filename="' + req.params.filename + '"')
+  res.send(readFileSync(p))
+})
+
+// Endpoint : télécharger la base courante (chaude — à utiliser de préférence après un /backup-now)
+app.get('/api/admin/db-download', requireAuth, requireRole('directeur'), async (req, res) => {
+  try {
+    const info = await dbBackupNow() // snapshot atomique, pas de lecture "à chaud" risquée
+    res.setHeader('Content-Type', 'application/octet-stream')
+    res.setHeader('Content-Disposition', 'attachment; filename="' + info.filename + '"')
+    res.send(readFileSync(info.path))
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Endpoint cron externe pour backup (protégé par CRON_SECRET, même secret que la purge RGPD)
+app.post('/api/admin/cron-backup', async (req, res) => {
+  const secret = req.headers['x-cron-secret'] || (req.query && req.query.secret)
+  if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'cron secret invalide' })
+  }
+  const r = await sauvegardeQuotidienne()
+  if (!r.ok) return res.status(500).json(r)
+  res.json(r)
+})
+
+// Première sauvegarde 10 min après démarrage (laisse le temps au boot), puis toutes les 24h
+setTimeout(() => { sauvegardeQuotidienne().catch(() => {}) }, 10 * 60 * 1000).unref?.()
+setInterval(() => { sauvegardeQuotidienne().catch(() => {}) }, 24 * 60 * 60 * 1000).unref?.()
+
+// ============================================================
 // DEMARRAGE
 // ============================================================
 
@@ -5204,6 +5327,9 @@ app.listen(PORT, () => {
   console.log('╚══════════════════════════════════════════╝')
   console.log('  Port          : ' + PORT)
   console.log('  Data          : ' + DATA + (process.env.DATA_DIR ? ' (volume persistant)' : ' (ephemere, dev)'))
+  const s = (() => { try { return dbStats() } catch (_) { return null } })()
+  console.log('  Base SQLite   : ' + (s ? s.path + ' (' + s.file_count + ' entrees, ' + Math.round(s.size_bytes / 1024) + ' ko)' : 'non initialisee — fallback JSON'))
+  console.log('  Backups       : ' + (s ? dbGetBackupDir() + ' (' + dbListBackups().length + ' sauvegarde(s))' : 'n/a'))
   console.log('  Telegram      : ' + (process.env.BOT_TOKEN ? 'token via env' : 'token fallback code'))
   console.log('  App URL       : ' + (process.env.APP_URL || '(APP_URL non definie - les liens Telegram utiliseront l\'URL par defaut)'))
   console.log('  Build prod    : ' + existsSync(join(DIST, 'index.html')))

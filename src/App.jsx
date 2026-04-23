@@ -588,35 +588,111 @@ function Login() {
 function Sidebar({ active, setActive, badge, onLogout, onChangePwd, onDemo, isDemo }) {
   const { user } = useAuthCtx()
 
-  const nav = [
-    { id: 'dashboard', ico: 'dashboard', label: 'Tableau de bord', roles: ['agent', 'directeur', 'elu'] },
-    { id: 'alertes', ico: 'notifications', label: 'Alertes', roles: ['agent', 'directeur'] },
-    { id: 'logements', ico: 'logements', label: 'Logements', roles: ['agent', 'directeur'] },
-    { id: 'demandeurs', ico: 'demandeurs', label: 'Demandeurs', roles: ['agent', 'directeur'] },
-    { id: 'matching', ico: 'matching', label: 'Matching', roles: ['agent', 'directeur'] },
-    { id: 'cal', ico: 'cal', label: 'Prépa CAL', roles: ['agent', 'directeur'] },
-    { id: 'audiences', ico: 'audiences', label: 'Audiences Élus', roles: ['agent', 'directeur', 'elu'] },
-    { id: 'elus', ico: 'elus', label: 'Gestion Élus', roles: ['agent', 'directeur'] },
-    { id: 'calendrier', ico: 'calendrier', label: 'Calendrier CAL', roles: ['agent', 'directeur'] },
-    { id: 'kanban', ico: 'matching', label: 'Kanban workflow', roles: ['agent', 'directeur'] },
-    { id: 'messagerie', ico: 'notifications', label: 'Messagerie', roles: ['agent', 'directeur', 'elu'] },
-    { id: 'relances', ico: 'notifications', label: 'Relances auto', roles: ['agent', 'directeur'] },
-    { id: 'ia-stats', ico: 'stats', label: 'IA prédictive', roles: ['agent', 'directeur'] },
-    { id: 'carte', ico: 'carte', label: 'Carte territoire', roles: ['agent', 'directeur', 'elu'] },
-    { id: 'rapport', ico: 'rapport', label: 'Rapport mensuel', roles: ['directeur', 'agent'] },
-    { id: 'scoring', ico: 'scoring', label: 'Scoring et règles', roles: ['directeur'] },
-    { id: 'stats', ico: 'stats', label: 'Statistiques', roles: ['agent', 'directeur', 'elu'] },
-    { id: 'import', ico: 'import', label: 'Import Pelehas', roles: ['agent', 'directeur'] },
-    { id: 'notifications', ico: 'notifications', label: 'Notifications', badge, roles: ['agent', 'directeur', 'elu'] },
-    { id: 'portail', ico: 'portail', label: 'Portail Candidat', roles: ['directeur', 'agent'] },
-    { id: 'users', ico: 'users', label: 'Utilisateurs', roles: ['directeur'] },
-    { id: 'referentiels', ico: 'logements', label: 'Référentiels 974', roles: ['directeur'] },
-    { id: 'telegram', ico: 'telegram', label: 'Telegram', roles: ['directeur', 'agent'] },
-    { id: 'logs', ico: 'logs', label: 'Journal', roles: ['directeur', 'agent'] }
-  ].filter(n => !user || n.roles.includes(user.role))
+  // Onglets regroupes en sections repliables. "always" = toujours visible.
+  // Chaque section est pliee par defaut sauf celle qui contient l'onglet actif.
+  const groups = [
+    {
+      id: 'pin', label: null, always: true,
+      items: [
+        { id: 'dashboard', ico: 'dashboard', label: 'Tableau de bord', roles: ['agent', 'directeur', 'elu'] },
+        { id: 'alertes', ico: 'notifications', label: 'Alertes', roles: ['agent', 'directeur'] },
+        { id: 'notifications', ico: 'notifications', label: 'Notifications', badge, roles: ['agent', 'directeur', 'elu'] }
+      ]
+    },
+    {
+      id: 'dossiers', label: 'Dossiers', ico: 'demandeurs',
+      items: [
+        { id: 'demandeurs', ico: 'demandeurs', label: 'Demandeurs', roles: ['agent', 'directeur'] },
+        { id: 'logements', ico: 'logements', label: 'Logements', roles: ['agent', 'directeur'] },
+        { id: 'kanban', ico: 'matching', label: 'Kanban workflow', roles: ['agent', 'directeur'] },
+        { id: 'messagerie', ico: 'notifications', label: 'Messagerie', roles: ['agent', 'directeur', 'elu'] },
+        { id: 'relances', ico: 'notifications', label: 'Relances auto', roles: ['agent', 'directeur'] }
+      ]
+    },
+    {
+      id: 'commission', label: 'Commission CAL', ico: 'cal',
+      items: [
+        { id: 'matching', ico: 'matching', label: 'Matching', roles: ['agent', 'directeur'] },
+        { id: 'cal', ico: 'cal', label: 'Prépa CAL', roles: ['agent', 'directeur'] },
+        { id: 'calendrier', ico: 'calendrier', label: 'Calendrier CAL', roles: ['agent', 'directeur'] },
+        { id: 'audiences', ico: 'audiences', label: 'Audiences Élus', roles: ['agent', 'directeur', 'elu'] },
+        { id: 'elus', ico: 'elus', label: 'Gestion Élus', roles: ['agent', 'directeur'] }
+      ]
+    },
+    {
+      id: 'analyses', label: 'Analyses', ico: 'stats',
+      items: [
+        { id: 'stats', ico: 'stats', label: 'Statistiques', roles: ['agent', 'directeur', 'elu'] },
+        { id: 'ia-stats', ico: 'stats', label: 'IA prédictive', roles: ['agent', 'directeur'] },
+        { id: 'carte', ico: 'carte', label: 'Carte territoire', roles: ['agent', 'directeur', 'elu'] },
+        { id: 'rapport', ico: 'rapport', label: 'Rapport mensuel', roles: ['directeur', 'agent'] }
+      ]
+    },
+    {
+      id: 'admin', label: 'Administration', ico: 'users',
+      items: [
+        { id: 'users', ico: 'users', label: 'Utilisateurs', roles: ['directeur'] },
+        { id: 'scoring', ico: 'scoring', label: 'Scoring et règles', roles: ['directeur'] },
+        { id: 'referentiels', ico: 'logements', label: 'Référentiels 974', roles: ['directeur'] },
+        { id: 'logs', ico: 'logs', label: 'Journal', roles: ['directeur', 'agent'] }
+      ]
+    },
+    {
+      id: 'outils', label: 'Outils & Intégrations', ico: 'telegram',
+      items: [
+        { id: 'telegram', ico: 'telegram', label: 'Telegram', roles: ['directeur', 'agent'] },
+        { id: 'portail', ico: 'portail', label: 'Portail Candidat', roles: ['directeur', 'agent'] },
+        { id: 'import', ico: 'import', label: 'Import Pelehas', roles: ['agent', 'directeur'] }
+      ]
+    }
+  ]
+
+  // Filtre par role
+  const visibleGroups = groups
+    .map(g => ({ ...g, items: g.items.filter(n => !user || n.roles.includes(user.role)) }))
+    .filter(g => g.items.length > 0)
+
+  // Quelle section contient l'onglet actif ? -> elle est ouverte par defaut
+  const activeGroup = (visibleGroups.find(g => g.items.some(i => i.id === active)) || {}).id
+
+  // Etat d'ouverture des sections (persiste en sessionStorage)
+  const [openGroups, setOpenGroups] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem('logivia_nav_open')
+      if (saved) return JSON.parse(saved)
+    } catch {}
+    return { [activeGroup]: true }
+  })
+
+  useEffect(() => {
+    // Ouvre automatiquement la section qui contient l'onglet actif
+    if (activeGroup && !openGroups[activeGroup]) {
+      setOpenGroups(prev => ({ ...prev, [activeGroup]: true }))
+    }
+  }, [activeGroup])
+
+  useEffect(() => {
+    try { sessionStorage.setItem('logivia_nav_open', JSON.stringify(openGroups)) } catch {}
+  }, [openGroups])
+
+  const toggleGroup = (id) => setOpenGroups(prev => ({ ...prev, [id]: !prev[id] }))
 
   const RC = { agent: C.blue, directeur: C.accent, elu: C.purple }
   const RL = { agent: 'Agent', directeur: 'Directeur', elu: 'Elu' }
+
+  // Badge total d'une section (somme des badges des enfants) pour alerter meme quand pliee
+  const groupBadge = (g) => g.items.reduce((s, i) => s + (i.badge > 0 ? i.badge : 0), 0)
+
+  const renderItem = (n) => (
+    <button key={n.id} onClick={() => setActive(n.id)}
+      onMouseEnter={e => { if (active !== n.id) { e.currentTarget.style.background = 'rgba(255,255,255,0.04)'; e.currentTarget.style.color = '#fff' } }}
+      onMouseLeave={e => { if (active !== n.id) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = C.light } }}
+      style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px 12px', borderRadius: 8, border: 'none', cursor: 'pointer', marginBottom: 2, fontFamily: Fh, fontSize: 12, fontWeight: active === n.id ? 700 : 500, background: active === n.id ? C.accent : 'transparent', color: active === n.id ? '#fff' : C.light, transition: 'all 0.15s ease', textAlign: 'left' }}>
+      <Icon name={n.ico} size={16} color={active === n.id ? '#fff' : C.light} />
+      <span style={{ flex: 1 }}>{n.label}</span>
+      {n.badge > 0 && <span style={{ fontSize: 10, background: active === n.id ? '#fff' : C.red, color: active === n.id ? C.accent : '#fff', borderRadius: 99, padding: '1px 7px', fontWeight: 800, minWidth: 18, textAlign: 'center' }}>{n.badge}</span>}
+    </button>
+  )
 
   return (
     <div style={{ width: 214, minWidth: 214, background: C.navy, display: 'flex', flexDirection: 'column', userSelect: 'none', overflowY: 'auto' }}>
@@ -629,17 +705,31 @@ function Sidebar({ active, setActive, badge, onLogout, onChangePwd, onDemo, isDe
           </div>
         </div>
       </div>
-      <nav style={{ padding: '10px 8px', flex: 1 }}>
-        {nav.map(n => (
-          <button key={n.id} onClick={() => setActive(n.id)}
-            onMouseEnter={e => { if (active !== n.id) { e.currentTarget.style.background = 'rgba(255,255,255,0.04)'; e.currentTarget.style.color = '#fff' } }}
-            onMouseLeave={e => { if (active !== n.id) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = C.light } }}
-            style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '9px 12px', borderRadius: 8, border: 'none', cursor: 'pointer', marginBottom: 2, fontFamily: Fh, fontSize: 12, fontWeight: active === n.id ? 700 : 500, background: active === n.id ? C.accent : 'transparent', color: active === n.id ? '#fff' : C.light, transition: 'all 0.15s ease', textAlign: 'left' }}>
-            <Icon name={n.ico} size={16} color={active === n.id ? '#fff' : C.light} />
-            <span style={{ flex: 1 }}>{n.label}</span>
-            {n.badge > 0 && <span style={{ fontSize: 10, background: active === n.id ? '#fff' : C.red, color: active === n.id ? C.accent : '#fff', borderRadius: 99, padding: '1px 7px', fontWeight: 800, minWidth: 18, textAlign: 'center' }}>{n.badge}</span>}
-          </button>
-        ))}
+      <nav style={{ padding: '8px 8px', flex: 1 }}>
+        {visibleGroups.map(g => {
+          if (g.always) {
+            // section "epinglee" toujours visible, pas de header
+            return <div key={g.id} style={{ marginBottom: 10 }}>{g.items.map(renderItem)}</div>
+          }
+          const open = !!openGroups[g.id]
+          const gb = groupBadge(g)
+          const hasActive = g.items.some(i => i.id === active)
+          return (
+            <div key={g.id} style={{ marginBottom: 4 }}>
+              <button
+                onClick={() => toggleGroup(g.id)}
+                onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.04)' }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 10px', borderRadius: 7, border: 'none', cursor: 'pointer', background: 'transparent', color: hasActive ? '#fff' : 'rgba(255,255,255,0.55)', fontFamily: Fh, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', textAlign: 'left', transition: 'all 0.15s ease' }}>
+                <Icon name={g.ico} size={13} color={hasActive ? '#fff' : 'rgba(255,255,255,0.45)'} />
+                <span style={{ flex: 1 }}>{g.label}</span>
+                {!open && gb > 0 && <span style={{ fontSize: 9, background: C.red, color: '#fff', borderRadius: 99, padding: '1px 6px', fontWeight: 800, minWidth: 16, textAlign: 'center' }}>{gb}</span>}
+                <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.45)', transition: 'transform 0.2s', transform: open ? 'rotate(90deg)' : 'rotate(0deg)', display: 'inline-block' }}>▶</span>
+              </button>
+              {open && <div style={{ paddingLeft: 6, borderLeft: '1px solid rgba(255,255,255,0.06)', marginLeft: 12, marginTop: 2, marginBottom: 4 }}>{g.items.map(renderItem)}</div>}
+            </div>
+          )
+        })}
       </nav>
       {user && (
         <div style={{ padding: '10px 12px', borderTop: '1px solid ' + C.navyB }}>
@@ -3966,6 +4056,352 @@ function AppInner() {
       </div>
       {showChangePwd && <ChangePasswordModal onClose={() => setShowChangePwd(false)} />}
       <RealtimeTopBar />
+      <AssistantIA setActive={setActive} />
+    </div>
+  )
+}
+
+// ===========================================================
+// ASSISTANT IA — widget chat flottant
+// ===========================================================
+// Bouton rond en bas a droite qui ouvre un panneau de conversation.
+// Parle a /api/ai/chat (cf. server/ai.js). Peut naviguer entre onglets
+// via le callback setActive passe par AppInner.
+
+function AssistantIA({ setActive }) {
+  const { user } = useAuthCtx()
+  const toast = useToast()
+  const [open, setOpen] = useState(false)
+  const [min, setMin] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [listening, setListening] = useState(false)
+  const [speak, setSpeak] = useState(() => {
+    try { return localStorage.getItem('logivia_tts') !== '0' } catch { return true }
+  })
+  const recognitionRef = useRef(null)
+  const scrollRef = useRef(null)
+  const inputRef = useRef(null)
+  const lastSpokenIdxRef = useRef(-1)
+  const [messages, setMessages] = useState(() => {
+    try {
+      const s = sessionStorage.getItem('logivia_chat_hist')
+      if (s) return JSON.parse(s)
+    } catch {}
+    return [{
+      role: 'assistant',
+      content: 'Bonjour ' + (user?.prenom || '') + ' 👋 Je suis l\'assistante Logivia. Posez-moi une question à l\'écrit ou au micro — et je peux aussi vous répondre à voix haute.',
+      suggestions: ['Combien de dossiers urgents ?', 'Audiences à venir', 'Stats du mois', 'Aide']
+    }]
+  })
+
+  // Capacites navigateur detectees dynamiquement
+  const canSTT = typeof window !== 'undefined' && (!!window.SpeechRecognition || !!window.webkitSpeechRecognition)
+  const canTTS = typeof window !== 'undefined' && !!window.speechSynthesis
+
+  // Persiste preference TTS
+  useEffect(() => {
+    try { localStorage.setItem('logivia_tts', speak ? '1' : '0') } catch {}
+    if (!speak && canTTS) window.speechSynthesis.cancel()
+  }, [speak, canTTS])
+
+  // Nettoie la voix + la reconnaissance quand on ferme / demonte
+  useEffect(() => {
+    return () => {
+      try { if (recognitionRef.current) recognitionRef.current.abort() } catch {}
+      try { if (canTTS) window.speechSynthesis.cancel() } catch {}
+    }
+  }, [canTTS])
+
+  // Transforme un texte markdown + emoji en quelque chose de lisible a haute voix
+  const cleanForVoice = (txt) => String(txt || '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/[•·▪●◦]/g, ',')
+    .replace(/[▶►→⇒]/g, '')
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '') // emojis
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\n+/g, '. ')
+    .trim()
+
+  const speakText = useCallback((txt) => {
+    if (!canTTS || !speak) return
+    try {
+      window.speechSynthesis.cancel()
+      const utter = new SpeechSynthesisUtterance(cleanForVoice(txt))
+      utter.lang = 'fr-FR'
+      utter.rate = 1.0
+      utter.pitch = 1.05
+      // Choisit une voix francaise si dispo
+      const voices = window.speechSynthesis.getVoices()
+      const frVoice = voices.find(v => v.lang && v.lang.startsWith('fr'))
+      if (frVoice) utter.voice = frVoice
+      window.speechSynthesis.speak(utter)
+    } catch (e) { /* silencieux */ }
+  }, [canTTS, speak])
+
+  // Lit automatiquement la derniere reponse de l'assistante
+  useEffect(() => {
+    if (!open || min || !speak || !canTTS) return
+    const last = messages.length - 1
+    if (last <= lastSpokenIdxRef.current) return
+    const m = messages[last]
+    if (m && m.role === 'assistant' && !m.error) {
+      lastSpokenIdxRef.current = last
+      speakText(m.content)
+    } else {
+      lastSpokenIdxRef.current = last
+    }
+  }, [messages, open, min, speak, canTTS, speakText])
+
+  // Persiste l'historique dans la session
+  useEffect(() => {
+    try { sessionStorage.setItem('logivia_chat_hist', JSON.stringify(messages.slice(-30))) } catch {}
+  }, [messages])
+
+  // Autoscroll
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  }, [messages, busy])
+
+  // Focus input quand on ouvre
+  useEffect(() => {
+    if (open && !min && inputRef.current) inputRef.current.focus()
+  }, [open, min])
+
+  const send = useCallback(async (text) => {
+    const q = (text || '').trim()
+    if (!q || busy) return
+    setMessages(m => [...m, { role: 'user', content: q }])
+    setDraft('')
+    setBusy(true)
+    try {
+      const res = await api('/ai/chat', { method: 'POST', body: { message: q } })
+      setMessages(m => [...m, {
+        role: 'assistant',
+        content: res.reply || 'Hmm, je n\'ai pas trouvé de réponse.',
+        actions: res.actions || [],
+        suggestions: res.suggestions || [],
+        llm: !!res.llm
+      }])
+      // Auto-navigation si l'IA le demande explicitement
+      const auto = (res.actions || []).find(a => a.auto && a.tab)
+      if (auto) setTimeout(() => setActive(auto.tab), 400)
+    } catch (e) {
+      setMessages(m => [...m, { role: 'assistant', content: 'Oups, je n\'ai pas pu contacter le serveur. ' + (e.message || ''), error: true }])
+    } finally {
+      setBusy(false)
+    }
+  }, [busy, setActive])
+
+  const runAction = (a) => {
+    if (a.openDemandeurId) {
+      try { sessionStorage.setItem('logivia_open_dem', a.openDemandeurId) } catch {}
+    }
+    if (a.tab) setActive(a.tab)
+    toast('Navigation : ' + (a.label || a.tab), 'info')
+  }
+
+  const reset = () => {
+    setMessages([{
+      role: 'assistant',
+      content: 'Conversation effacée. Que puis-je faire pour vous ?',
+      suggestions: ['Dossiers urgents', 'Stats du mois', 'Aide']
+    }])
+    try { sessionStorage.removeItem('logivia_chat_hist') } catch {}
+  }
+
+  // Rendu du markdown minimal (gras **..**, puces •)
+  const renderContent = (text) => {
+    if (!text) return null
+    const lines = String(text).split('\n')
+    return lines.map((line, i) => {
+      // Gras markdown simple
+      const parts = line.split(/(\*\*[^*]+\*\*)/g).map((p, j) => {
+        if (/^\*\*[^*]+\*\*$/.test(p)) {
+          return <strong key={j} style={{ color: C.navy }}>{p.slice(2, -2)}</strong>
+        }
+        return <span key={j}>{p}</span>
+      })
+      return <div key={i} style={{ minHeight: line === '' ? 6 : 'auto' }}>{parts}</div>
+    })
+  }
+
+  const PANEL_W = 380
+  const PANEL_H = 560
+
+  // Bouton ferme (juste la bulle)
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        aria-label="Ouvrir l'assistante Logivia"
+        style={{
+          position: 'fixed', bottom: 80, right: 20, zIndex: 910,
+          width: 56, height: 56, borderRadius: 28,
+          background: 'linear-gradient(135deg,' + C.accent + ' 0%, #F68144 100%)',
+          border: 'none', cursor: 'pointer',
+          boxShadow: '0 8px 24px rgba(224,92,42,0.45)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'transform 0.15s ease'
+        }}
+        onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.08)'}
+        onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
+      >
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+        </svg>
+        <span style={{ position: 'absolute', top: -4, right: -4, width: 14, height: 14, borderRadius: '50%', background: '#22c55e', border: '2px solid #fff' }} />
+      </button>
+    )
+  }
+
+  // Panneau minimise (juste la bande)
+  if (min) {
+    return (
+      <div
+        style={{
+          position: 'fixed', bottom: 80, right: 20, zIndex: 910,
+          width: PANEL_W, background: C.navy, borderRadius: 12,
+          boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+          display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px',
+          cursor: 'pointer'
+        }}
+        onClick={() => setMin(false)}
+      >
+        <div style={{ width: 30, height: 30, borderRadius: 15, background: C.accent, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <span style={{ fontSize: 14, fontWeight: 800, color: '#fff' }}>L</span>
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ color: '#fff', fontFamily: Fh, fontSize: 13, fontWeight: 700 }}>Assistante Logivia</div>
+          <div style={{ color: 'rgba(255,255,255,0.6)', fontSize: 10.5 }}>Cliquez pour ouvrir</div>
+        </div>
+        <button
+          onClick={e => { e.stopPropagation(); setOpen(false); setMin(false) }}
+          style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}
+          aria-label="Fermer"
+        >×</button>
+      </div>
+    )
+  }
+
+  // Panneau ouvert complet
+  return (
+    <div style={{
+      position: 'fixed', bottom: 80, right: 20, zIndex: 910,
+      width: PANEL_W, height: PANEL_H,
+      background: C.card, borderRadius: 14,
+      boxShadow: '0 16px 40px rgba(0,0,0,0.22)',
+      border: '1px solid ' + C.border,
+      display: 'flex', flexDirection: 'column',
+      fontFamily: Fb, overflow: 'hidden',
+      animation: 'pageFade 0.25s ease both'
+    }}>
+      {/* Header */}
+      <div style={{
+        background: 'linear-gradient(135deg,' + C.navy + ' 0%, ' + C.navyB + ' 100%)',
+        padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10
+      }}>
+        <div style={{ width: 34, height: 34, borderRadius: 17, background: 'linear-gradient(135deg,' + C.accent + ',#F68144)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+          </svg>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ color: '#fff', fontFamily: Fh, fontWeight: 800, fontSize: 14, letterSpacing: '-0.02em' }}>Assistante Logivia</div>
+          <div style={{ color: 'rgba(255,255,255,0.65)', fontSize: 10.5, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }} />
+            En ligne — vos données restent dans Logivia
+          </div>
+        </div>
+        <button onClick={reset} title="Nouvelle conversation" style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: 11, padding: '4px 6px', fontFamily: Fh }}>↻</button>
+        <button onClick={() => setMin(true)} title="Réduire" style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: 18, padding: '0 4px', lineHeight: 1 }}>–</button>
+        <button onClick={() => setOpen(false)} title="Fermer" style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: 18, padding: '0 4px', lineHeight: 1 }}>×</button>
+      </div>
+
+      {/* Historique messages */}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px', background: '#F7F9FC' }}>
+        {messages.map((m, i) => (
+          <div key={i} style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+            <div style={{
+              background: m.role === 'user' ? C.accent : (m.error ? C.redBg : '#fff'),
+              color: m.role === 'user' ? '#fff' : (m.error ? C.red : C.text),
+              padding: '9px 13px', borderRadius: 12,
+              borderBottomRightRadius: m.role === 'user' ? 4 : 12,
+              borderBottomLeftRadius: m.role === 'user' ? 12 : 4,
+              maxWidth: '85%', fontSize: 12.5, lineHeight: 1.5,
+              boxShadow: m.role === 'assistant' && !m.error ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+              border: m.role === 'assistant' && !m.error ? '1px solid ' + C.border : 'none',
+              whiteSpace: 'pre-wrap', wordBreak: 'break-word'
+            }}>
+              {renderContent(m.content)}
+              {m.llm && (
+                <div style={{ fontSize: 9, color: C.muted, marginTop: 6, fontStyle: 'italic' }}>Réponse générée par IA externe</div>
+              )}
+            </div>
+            {/* Actions */}
+            {m.actions && m.actions.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6, maxWidth: '85%' }}>
+                {m.actions.map((a, j) => (
+                  <button key={j} onClick={() => runAction(a)} style={{
+                    padding: '5px 11px', borderRadius: 14, fontSize: 11,
+                    border: '1px solid ' + C.accent, background: C.accentL, color: C.accent,
+                    cursor: 'pointer', fontFamily: Fh, fontWeight: 700
+                  }}>→ {a.label}</button>
+                ))}
+              </div>
+            )}
+            {/* Suggestions */}
+            {m.suggestions && m.suggestions.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 6, maxWidth: '85%' }}>
+                {m.suggestions.map((s, j) => (
+                  <button key={j} onClick={() => send(s)} disabled={busy} style={{
+                    padding: '4px 10px', borderRadius: 12, fontSize: 11,
+                    border: '1px solid ' + C.border, background: '#fff', color: C.muted,
+                    cursor: busy ? 'default' : 'pointer', fontFamily: Fb
+                  }}>{s}</button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+        {busy && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: C.muted, fontSize: 11, fontStyle: 'italic', padding: '4px 8px' }}>
+            <span className="logivia-dot" style={{ width: 6, height: 6, borderRadius: 3, background: C.accent, display: 'inline-block', animation: 'logiviaDot 1.2s infinite 0s' }} />
+            <span className="logivia-dot" style={{ width: 6, height: 6, borderRadius: 3, background: C.accent, display: 'inline-block', animation: 'logiviaDot 1.2s infinite 0.2s' }} />
+            <span className="logivia-dot" style={{ width: 6, height: 6, borderRadius: 3, background: C.accent, display: 'inline-block', animation: 'logiviaDot 1.2s infinite 0.4s' }} />
+            <span>Je réfléchis…</span>
+          </div>
+        )}
+      </div>
+
+      {/* Input */}
+      <form
+        onSubmit={e => { e.preventDefault(); send(draft) }}
+        style={{ borderTop: '1px solid ' + C.border, background: '#fff', padding: 10, display: 'flex', gap: 6 }}
+      >
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          placeholder={busy ? 'En cours…' : 'Posez votre question…'}
+          disabled={busy}
+          style={{
+            flex: 1, padding: '9px 12px', borderRadius: 10,
+            border: '1px solid ' + C.border, fontFamily: Fb, fontSize: 12.5,
+            background: '#F7F9FC', color: C.text, outline: 'none'
+          }}
+        />
+        <button
+          type="submit"
+          disabled={busy || !draft.trim()}
+          style={{
+            padding: '0 14px', borderRadius: 10, border: 'none',
+            background: busy || !draft.trim() ? C.light : C.accent, color: '#fff',
+            fontFamily: Fh, fontSize: 12, fontWeight: 700,
+            cursor: busy || !draft.trim() ? 'default' : 'pointer'
+          }}
+        >Envoyer</button>
+      </form>
     </div>
   )
 }
@@ -4034,6 +4470,7 @@ export default function App() {
       button:not(:disabled):active { transform: scale(0.98); }
       @keyframes pageFade { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
       .logivia-page { animation: pageFade 0.35s ease both; }
+      @keyframes logiviaDot { 0%, 80%, 100% { opacity: 0.2; transform: translateY(0) } 40% { opacity: 1; transform: translateY(-3px) } }
     `
     if (!document.getElementById('logivia-global-styles')) document.head.appendChild(style)
     return () => { const el = document.getElementById('logivia-global-styles'); if (el) el.remove() }

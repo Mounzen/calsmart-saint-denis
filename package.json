@@ -1,8 +1,7 @@
 {
-  "name": "logivia",
+  "name": "cal-smart",
   "version": "3.0.0",
   "type": "module",
-  "description": "Logivia — Gestion intelligente des attributions de logements · Saint-Denis de la Réunion (974)",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "client": "vite --port 3000",
@@ -10,12 +9,8 @@
     "build": "vite build",
     "start": "node server/index.js"
   },
-  "engines": {
-    "node": ">=18.0.0 <23.0.0"
-  },
   "dependencies": {
     "@vitejs/plugin-react": "^4.2.0",
-    "better-sqlite3": "^11.3.0",
     "concurrently": "^8.2.0",
     "cors": "^2.8.5",
     "express": "^4.18.2",

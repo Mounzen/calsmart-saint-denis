@@ -49,6 +49,7 @@ import {
   listFiles as dbListFiles,
   closeDatabase as dbClose
 } from './db.js'
+import { answerQuery as aiAnswer, answerWithLLM as aiLlm } from './ai.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -5298,6 +5299,54 @@ app.get('/api/admin/db-download', requireAuth, requireRole('directeur'), async (
     res.send(readFileSync(info.path))
   } catch (e) {
     res.status(500).json({ error: e.message })
+  }
+})
+
+// ============================================================
+// ASSISTANT IA CONVERSATIONNEL
+// ============================================================
+//
+// Endpoint unique /api/ai/chat : le client envoie { message, history? }.
+// Le serveur :
+//   1. Tente une reponse rules-based (detection d'intention + donnees vivantes)
+//   2. Si l'intention est "unknown" et qu'une cle ANTHROPIC_API_KEY est presente,
+//      fallback vers Claude Haiku pour une reponse libre
+//   3. Renvoie { reply, actions?, suggestions?, intent, llm? }
+//
+// Les actions sont des hints pour le client : { label, tab, auto?, openDemandeurId? }
+// Le client decide quoi en faire (boutons cliquables, auto-navigation).
+
+app.post('/api/ai/chat', requireAuth, async (req, res) => {
+  try {
+    const { message } = req.body || {}
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ error: 'message requis' })
+    }
+    const q = message.trim().slice(0, 500) // garde-fou volumetrie
+    if (!q) return res.status(400).json({ error: 'message vide' })
+
+    const ctx = {
+      user: req.user,
+      // aiAnswer utilise readArr(name) et readObj(name) sans extension .json
+      readArr: (name) => readData(name + '.json'),
+      readObj: (name) => readObj(name + '.json', {})
+    }
+
+    // 1. Rules-based (tres rapide, offline)
+    const local = aiAnswer(q, ctx)
+
+    // 2. Si on n'a pas compris ET qu'on a une cle LLM, on tente Claude
+    if (process.env.ANTHROPIC_API_KEY && local && local.reply && local.reply.startsWith("Je n'ai pas compris")) {
+      const llm = await aiLlm(q, ctx)
+      if (llm && llm.reply) {
+        return res.json({ ...llm, intent: 'llm', suggestions: ['Aide', 'Dossiers urgents', 'Stats du mois'] })
+      }
+    }
+
+    res.json({ ...local, intent: 'rules' })
+  } catch (e) {
+    console.error('[ai/chat]', e.message)
+    res.status(500).json({ error: 'erreur assistant', reply: 'Desolee, j\'ai eu un probleme technique. Reessayez dans un instant.' })
   }
 })
 

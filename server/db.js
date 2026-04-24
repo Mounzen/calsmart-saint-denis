@@ -19,25 +19,48 @@
  * initial Railway.
  */
 
-import Database from 'better-sqlite3'
+// Import dynamique de better-sqlite3 : si le module natif n'est pas installe
+// (ex: Railway qui a rate le postinstall, environnement sans build tools,
+// Node incompatible), on laisse le serveur demarrer en mode degrade JSON-only.
+// Les helpers readData/readObj/writeData cote index.js ont un fallback prevu.
 import { readFileSync, existsSync, readdirSync, mkdirSync, copyFileSync, statSync, unlinkSync } from 'fs'
 import { join } from 'path'
 
+let Database = null
 let db = null
 let DB_PATH = null
 let BACKUP_DIR = null
 let cachedStatements = {}
 
+async function loadSqliteDriver() {
+  if (Database) return Database
+  try {
+    const mod = await import('better-sqlite3')
+    Database = mod.default || mod
+    return Database
+  } catch (e) {
+    // Module absent ou binaire natif non compile pour cette plateforme/version Node.
+    // On propage une erreur claire pour que openDatabase() puisse la catcher.
+    const err = new Error('better-sqlite3 indisponible (' + e.code + ') : ' + e.message)
+    err.code = 'SQLITE_UNAVAILABLE'
+    throw err
+  }
+}
+
 /**
  * Ouvre (ou crée) la base SQLite.
  * À appeler une seule fois au démarrage du serveur.
+ * ATTENTION : devenue ASYNC en v3.2 pour supporter l'import dynamique
+ * du driver natif (fallback Railway si module non installe).
  */
-export function openDatabase(dataDir) {
+export async function openDatabase(dataDir) {
   if (db) return db
 
   DB_PATH = join(dataDir, 'logivia.db')
   BACKUP_DIR = join(dataDir, 'backups')
   if (!existsSync(BACKUP_DIR)) mkdirSync(BACKUP_DIR, { recursive: true })
+
+  await loadSqliteDriver()
 
   const isFresh = !existsSync(DB_PATH)
 

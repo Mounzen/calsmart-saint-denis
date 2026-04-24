@@ -90,13 +90,19 @@ if (DATA !== SEED_DATA && existsSync(SEED_DATA)) {
 }
 
 // Ouverture de la base SQLite (migration auto des JSON si base neuve)
+// openDatabase est async depuis v3.2 : import dynamique de better-sqlite3
+// pour encaisser un environnement ou le module natif n'est pas installe
+// (ex: Railway qui a rate le postinstall) -> on bascule proprement sur JSON.
+let SQLITE_READY = false
 try {
-  openDatabase(DATA)
+  await openDatabase(DATA)
   const s = dbStats()
   if (s) console.log('[db] SQLite prete : ' + s.file_count + ' entree(s), ' + Math.round(s.size_bytes / 1024) + ' ko')
+  SQLITE_READY = true
 } catch (e) {
   console.error('[db] ouverture impossible : ' + e.message)
   console.error('[db] le serveur fonctionnera en mode degrade (lecture/ecriture JSON fallback)')
+  console.error('[db] pour activer SQLite : "npm install better-sqlite3" puis redeployer')
 }
 
 // Fermeture propre de la base au shutdown

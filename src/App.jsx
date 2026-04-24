@@ -4201,6 +4201,55 @@ function AssistantIA({ setActive }) {
     toast('Navigation : ' + (a.label || a.tab), 'info')
   }
 
+  // ----- DICTEE VOCALE (Web Speech API) -----------------------------
+  // On cree l'instance SpeechRecognition a la demande (pas au mount, sinon
+  // certains navigateurs demandent le micro avant que l'utilisateur n'ait clique).
+  const startListening = () => {
+    if (!canSTT) { toast('Micro non supporte par ce navigateur (essayez Chrome/Edge)', 'error'); return }
+    if (listening) return
+    // Coupe la lecture en cours : on n'ecoute pas si l'app parle encore
+    if (canTTS) window.speechSynthesis.cancel()
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    const rec = new SR()
+    rec.lang = 'fr-FR'
+    rec.continuous = false
+    rec.interimResults = true
+    rec.maxAlternatives = 1
+    let finalText = ''
+    rec.onresult = (ev) => {
+      let interim = ''
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const r = ev.results[i]
+        if (r.isFinal) finalText += r[0].transcript
+        else interim += r[0].transcript
+      }
+      setDraft((finalText + ' ' + interim).trim())
+    }
+    rec.onerror = (ev) => {
+      setListening(false)
+      if (ev.error === 'not-allowed' || ev.error === 'permission-denied') {
+        toast('Autorisez le micro dans le navigateur', 'error')
+      } else if (ev.error !== 'aborted' && ev.error !== 'no-speech') {
+        toast('Erreur micro : ' + ev.error, 'error')
+      }
+    }
+    rec.onend = () => {
+      setListening(false)
+      // Envoi automatique si on a capture du texte
+      const txt = finalText.trim()
+      if (txt) setTimeout(() => send(txt), 150)
+    }
+    recognitionRef.current = rec
+    try { rec.start(); setListening(true) } catch (e) { toast('Micro deja actif', 'info') }
+  }
+
+  const stopListening = () => {
+    try { if (recognitionRef.current) recognitionRef.current.stop() } catch {}
+    setListening(false)
+  }
+
+  const toggleListen = () => { listening ? stopListening() : startListening() }
+
   const reset = () => {
     setMessages([{
       role: 'assistant',
@@ -4313,6 +4362,19 @@ function AssistantIA({ setActive }) {
             En ligne — vos données restent dans Logivia
           </div>
         </div>
+        {canTTS && (
+          <button
+            onClick={() => setSpeak(v => !v)}
+            title={speak ? 'Couper la voix' : 'Activer la lecture vocale'}
+            style={{ background: 'transparent', border: 'none', color: speak ? '#fff' : 'rgba(255,255,255,0.35)', cursor: 'pointer', padding: '4px 6px' }}
+          >
+            {speak ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></svg>
+            )}
+          </button>
+        )}
         <button onClick={reset} title="Nouvelle conversation" style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: 11, padding: '4px 6px', fontFamily: Fh }}>↻</button>
         <button onClick={() => setMin(true)} title="Réduire" style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: 18, padding: '0 4px', lineHeight: 1 }}>–</button>
         <button onClick={() => setOpen(false)} title="Fermer" style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: 18, padding: '0 4px', lineHeight: 1 }}>×</button>
@@ -4383,14 +4445,39 @@ function AssistantIA({ setActive }) {
           ref={inputRef}
           value={draft}
           onChange={e => setDraft(e.target.value)}
-          placeholder={busy ? 'En cours…' : 'Posez votre question…'}
+          placeholder={busy ? 'En cours…' : (listening ? 'Je vous écoute…' : 'Question ou micro…')}
           disabled={busy}
           style={{
             flex: 1, padding: '9px 12px', borderRadius: 10,
-            border: '1px solid ' + C.border, fontFamily: Fb, fontSize: 12.5,
-            background: '#F7F9FC', color: C.text, outline: 'none'
+            border: '1px solid ' + (listening ? C.accent : C.border), fontFamily: Fb, fontSize: 12.5,
+            background: listening ? C.accentL : '#F7F9FC', color: C.text, outline: 'none',
+            transition: 'all 0.2s'
           }}
         />
+        {canSTT && (
+          <button
+            type="button"
+            onClick={toggleListen}
+            disabled={busy}
+            title={listening ? 'Arrêter' : 'Dicter (micro)'}
+            style={{
+              width: 38, height: 38, borderRadius: 19, border: 'none',
+              background: listening ? C.red : (busy ? C.light : '#F7F9FC'),
+              color: listening ? '#fff' : C.navy,
+              cursor: busy ? 'default' : 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: listening ? '0 0 0 4px rgba(220,38,38,0.2)' : 'none',
+              animation: listening ? 'logiviaPulse 1.2s infinite' : 'none'
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+            </svg>
+          </button>
+        )}
         <button
           type="submit"
           disabled={busy || !draft.trim()}
@@ -4471,6 +4558,7 @@ export default function App() {
       @keyframes pageFade { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
       .logivia-page { animation: pageFade 0.35s ease both; }
       @keyframes logiviaDot { 0%, 80%, 100% { opacity: 0.2; transform: translateY(0) } 40% { opacity: 1; transform: translateY(-3px) } }
+      @keyframes logiviaPulse { 0% { box-shadow: 0 0 0 0 rgba(220,38,38,0.45) } 70% { box-shadow: 0 0 0 10px rgba(220,38,38,0) } 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0) } }
     `
     if (!document.getElementById('logivia-global-styles')) document.head.appendChild(style)
     return () => { const el = document.getElementById('logivia-global-styles'); if (el) el.remove() }

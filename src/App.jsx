@@ -614,6 +614,7 @@ function Sidebar({ active, setActive, badge, onLogout, onChangePwd, onDemo, isDe
       items: [
         { id: 'matching', ico: 'matching', label: 'Matching', roles: ['agent', 'directeur'] },
         { id: 'cal', ico: 'cal', label: 'Prépa CAL', roles: ['agent', 'directeur'] },
+        { id: 'decision-cal', ico: 'cal', label: 'Mode Décision CAL', roles: ['agent', 'directeur'] },
         { id: 'calendrier', ico: 'calendrier', label: 'Calendrier CAL', roles: ['agent', 'directeur'] },
         { id: 'audiences', ico: 'audiences', label: 'Audiences Élus', roles: ['agent', 'directeur', 'elu'] },
         { id: 'elus', ico: 'elus', label: 'Gestion Élus', roles: ['agent', 'directeur'] }
@@ -623,6 +624,7 @@ function Sidebar({ active, setActive, badge, onLogout, onChangePwd, onDemo, isDe
       id: 'analyses', label: 'Analyses', ico: 'stats',
       items: [
         { id: 'stats', ico: 'stats', label: 'Statistiques', roles: ['agent', 'directeur', 'elu'] },
+        { id: 'contingents', ico: 'scoring', label: 'Contingents', roles: ['agent', 'directeur'] },
         { id: 'ia-stats', ico: 'stats', label: 'IA prédictive', roles: ['agent', 'directeur'] },
         { id: 'carte', ico: 'carte', label: 'Carte territoire', roles: ['agent', 'directeur', 'elu'] },
         { id: 'rapport', ico: 'rapport', label: 'Rapport mensuel', roles: ['directeur', 'agent'] }
@@ -633,6 +635,7 @@ function Sidebar({ active, setActive, badge, onLogout, onChangePwd, onDemo, isDe
       items: [
         { id: 'users', ico: 'users', label: 'Utilisateurs', roles: ['directeur'] },
         { id: 'scoring', ico: 'scoring', label: 'Scoring et règles', roles: ['directeur'] },
+        { id: 'qualite', ico: 'alertes', label: 'Qualité des données', roles: ['directeur', 'agent'] },
         { id: 'referentiels', ico: 'logements', label: 'Référentiels 974', roles: ['directeur'] },
         { id: 'logs', ico: 'logs', label: 'Journal', roles: ['directeur', 'agent'] }
       ]
@@ -782,9 +785,26 @@ function Dashboard({ setActive }) {
         ))}
       </div>
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-        <div style={{ background: C.card, borderRadius: 12, padding: 18, border: '1px solid ' + C.border, flex: 1 }}>
-          <div style={{ fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 14 }}>Tension par typologie</div>
-          {Object.entries(data.tension_par_typ || {}).map(([typ, nb]) => {
+        <div style={{ background: C.card, borderRadius: 12, padding: 18, border: '1px solid ' + C.border, flex: 1, minWidth: 300 }}>
+          <div style={{ fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 6 }}>Pression par typologie (demande / offre)</div>
+          <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 12 }}>Ratio &lt;2 = vert · 2-5 = orange · &gt;5 = rouge</div>
+          {(data.pression_par_typ || []).map(row => {
+            const couleurs = { vert: '#16A34A', orange: '#D97706', rouge: '#DC2626', gris: '#94A3B8' }
+            const col = couleurs[row.couleur] || C.muted
+            return (
+              <div key={row.typ} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 9 }}>
+                <span style={{ fontFamily: Fh, fontWeight: 700, fontSize: 12, width: 26, color: C.text }}>{row.typ}</span>
+                <div style={{ fontSize: 10.5, color: C.muted, width: 80 }}>
+                  <span style={{ color: C.text, fontWeight: 700 }}>{row.demande}</span> / {row.offre}
+                </div>
+                <div style={{ flex: 1, height: 8, background: '#EEF1F6', borderRadius: 99, position: 'relative' }}>
+                  <div style={{ height: '100%', width: Math.min(100, row.ratio * 15) + '%', background: col, borderRadius: 99 }} />
+                </div>
+                <span style={{ fontSize: 11, color: col, fontWeight: 700, width: 50, textAlign: 'right' }}>×{row.ratio}</span>
+              </div>
+            )
+          })}
+          {!(data.pression_par_typ || []).length && Object.entries(data.tension_par_typ || {}).map(([typ, nb]) => {
             const max = Math.max(1, ...Object.values(data.tension_par_typ))
             const col = nb / max >= 0.8 ? C.red : nb / max >= 0.5 ? C.amber : C.green
             return (
@@ -798,14 +818,21 @@ function Dashboard({ setActive }) {
             )
           })}
         </div>
-        <div style={{ background: C.card, borderRadius: 12, padding: 18, border: '1px solid ' + C.border, flex: 1 }}>
-          <div style={{ fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 14 }}>Demandes par quartier</div>
-          {(data.tension_par_quartier || []).slice(0, 6).map(({ quartier, nb }) => (
-            <div key={quartier} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 7 }}>
-              <span style={{ fontSize: 12, color: C.text }}>{quartier}</span>
-              <span style={{ fontSize: 13, fontWeight: 800, color: C.accent, fontFamily: Fh }}>{nb}</span>
-            </div>
-          ))}
+        <div style={{ background: C.card, borderRadius: 12, padding: 18, border: '1px solid ' + C.border, flex: 1, minWidth: 300 }}>
+          <div style={{ fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 6 }}>Tension par quartier</div>
+          <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 12 }}>Couleur selon ratio demande/offre</div>
+          {(data.tension_par_quartier || []).slice(0, 8).map((row) => {
+            const couleurs = { vert: '#16A34A', orange: '#D97706', rouge: '#DC2626', gris: '#94A3B8' }
+            const col = couleurs[row.couleur] || C.accent
+            return (
+              <div key={row.quartier} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
+                <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 99, background: col, flexShrink: 0 }} />
+                <span style={{ fontSize: 12, color: C.text, flex: 1 }}>{row.quartier}</span>
+                <span style={{ fontSize: 10.5, color: C.muted }}>{row.demande || row.nb}/{row.offre != null ? row.offre : '?'}</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: col, fontFamily: Fh, width: 44, textAlign: 'right' }}>{row.ratio != null ? '×' + row.ratio : row.nb}</span>
+              </div>
+            )
+          })}
         </div>
         <div style={{ background: C.card, borderRadius: 12, padding: 18, border: '1px solid ' + C.border, flex: 1 }}>
           <div style={{ fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 14 }}>Actions rapides</div>
@@ -1202,6 +1229,32 @@ function CourrierPDFModal({ dem, type, onClose, toast, onSaved }) {
     finally { setBusy(false) }
   }
 
+  // Export Word .docx (editable) - complementaire du PDF imprimable
+  const downloadDocx = async () => {
+    setBusy(true)
+    try {
+      const token = getToken()
+      const r = await fetch('/api/courriers/preview-docx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-auth-token': token || '' },
+        body: JSON.stringify(buildBody())
+      })
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: r.status }))
+        throw new Error(err.error || String(r.status))
+      }
+      const blob = await r.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'courrier_' + type + '_' + dem.id + '.docx'
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(url), 5000)
+      toast('Document Word téléchargé', 'success')
+    } catch (e) { toast('Erreur .docx : ' + e.message, 'error') }
+    finally { setBusy(false) }
+  }
+
   return (
     <Modal title={meta.title + ' - ' + dem.nom + ' ' + dem.prenom} onClose={onClose} maxW={620}>
       <div style={{ background: meta.color + '15', border: '1px solid ' + meta.color + '44', borderRadius: 9, padding: '10px 14px', fontSize: 12, color: meta.color, marginBottom: 16, fontWeight: 600 }}>
@@ -1248,9 +1301,10 @@ function CourrierPDFModal({ dem, type, onClose, toast, onSaved }) {
         Envoyer aussi par Telegram (si le candidat est connecté au bot)
       </label>
 
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 20, flexWrap: 'wrap' }}>
         <button onClick={onClose} disabled={busy} style={{ padding: '9px 16px', border: '1px solid ' + C.border, borderRadius: 8, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 600, color: C.muted }}>Annuler</button>
-        <button onClick={apercu} disabled={busy} style={{ padding: '9px 16px', border: '1px solid ' + C.blue, borderRadius: 8, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.blue }}>Aperçu sans enregistrer</button>
+        <button onClick={apercu} disabled={busy} style={{ padding: '9px 16px', border: '1px solid ' + C.blue, borderRadius: 8, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.blue }}>Aperçu PDF</button>
+        <button onClick={downloadDocx} disabled={busy} style={{ padding: '9px 16px', border: '1px solid #2B5797', borderRadius: 8, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700, color: '#2B5797' }}>Télécharger .docx</button>
         <button onClick={saveAndOpen} disabled={busy} style={{ padding: '9px 20px', background: meta.color, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 700 }}>{busy ? '...' : 'Enregistrer + ouvrir PDF'}</button>
       </div>
     </Modal>
@@ -1734,11 +1788,22 @@ function Matching({ initLog, addToCAL }) {
                 <div style={{ color: C.light, fontSize: 11 }}>{results.logement.contingent}</div>
               </div>
             </div>
+            {results.logement_contingent && (
+              <div style={{ background: C.accentL, border: '1px solid ' + C.accent, borderRadius: 8, padding: '10px 14px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, fontSize: 12.5 }}>
+                <span style={{ fontSize: 11, fontWeight: 800, color: C.accent, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Contingent</span>
+                <span style={{ fontWeight: 700, color: C.text }}>{results.logement_contingent}</span>
+                <span style={{ flex: 1, color: C.muted, fontSize: 11.5 }}>
+                  Matching filtré sur les candidats éligibles à ce contingent.
+                  {results.stats.nb_hors_contingent > 0 && <> {results.stats.nb_hors_contingent} candidat(s) éligible(s) hors contingent (dérogation CAL possible).</>}
+                </span>
+              </div>
+            )}
             <div style={{ display: 'flex', gap: 10, marginBottom: 18, alignItems: 'center' }}>
               {[
-                { label: 'Eligibles', val: results.stats.nb_eligible, color: C.green },
-                { label: 'Top 4', val: Math.min(4, results.stats.nb_eligible), color: C.accent },
+                { label: 'Conformes', val: results.stats.nb_conforme_contingent || results.stats.nb_eligible, color: C.green },
+                { label: 'Top 4', val: Math.min(4, results.stats.nb_conforme_contingent || results.stats.nb_eligible), color: C.accent },
                 { label: 'Avec audience', val: results.stats.nb_avec_audience, color: C.purple },
+                { label: 'Hors contingent', val: results.stats.nb_hors_contingent || 0, color: C.amber },
                 { label: 'Non eligibles', val: results.stats.nb_ineligible, color: C.red }
               ].map((s, i) => (
                 <div key={i} style={{ background: C.card, borderRadius: 8, padding: '9px 14px', border: '1px solid ' + C.border, textAlign: 'center' }}>
@@ -2234,7 +2299,17 @@ function CALPrepa({ dossiers, user }) {
                       <td style={{ padding: '9px 12px', color: C.text }}>{c.dem.compo}</td>
                       <td style={{ padding: '9px 12px', fontWeight: 600 }}>{(c.dem.rev || 0).toLocaleString()} EUR</td>
                       <td style={{ padding: '9px 12px' }}><span style={{ fontWeight: 700, color: parseFloat(c.res.te) <= 30 ? C.green : parseFloat(c.res.te) <= 35 ? C.amber : C.red }}>{c.res.te}%</span></td>
-                      <td style={{ padding: '9px 12px' }}><span style={{ fontWeight: 800, fontSize: 15, color: adq.color, fontFamily: Fh }}>{c.res.total}</span></td>
+                      <td style={{ padding: '9px 12px' }}>
+                        <span style={{ fontWeight: 800, fontSize: 15, color: adq.color, fontFamily: Fh }}>{c.res.total}</span>
+                        {c.res.confiance && (
+                          <div title={(c.res.confiance_raisons || []).join(' · ')}
+                               style={{ marginTop: 2, display: 'inline-block', padding: '1px 6px', marginLeft: 5, borderRadius: 8, fontSize: 9, fontWeight: 700, letterSpacing: '0.02em',
+                                        color: c.res.confiance === 'eleve' ? '#16A34A' : c.res.confiance === 'risque' ? '#DC2626' : '#D97706',
+                                        background: c.res.confiance === 'eleve' ? '#DCFCE7' : c.res.confiance === 'risque' ? '#FEE2E2' : '#FEF3C7' }}>
+                            {c.res.confiance === 'eleve' ? 'ELEVE' : c.res.confiance === 'risque' ? 'RISQUE' : 'MOYEN'}
+                          </div>
+                        )}
+                      </td>
                       <td style={{ padding: '9px 12px' }}>
                         {c.dem.dalo && <Pill label="DALO" color={C.red} bg={C.redBg} />}
                         {c.dem.violences && <Pill label="VIF" color={C.red} bg={C.redBg} />}
@@ -3136,6 +3211,10 @@ function PortailCandidatPage() {
   const [nud, setNud] = useState('')
   const [dob, setDob] = useState('')
 
+  // FranceConnect state
+  const [fcStatus, setFcStatus] = useState(null) // { enabled, env }
+  const [fcError, setFcError] = useState('')
+
   // DOB setup state
   const [dobSetup, setDobSetup] = useState('')
 
@@ -3159,6 +3238,36 @@ function PortailCandidatPage() {
     { n: 3, label: 'En CAL' },
     { n: 4, label: 'Attribué' }
   ]
+
+  // FranceConnect : au chargement, on interroge le statut ET on traite un retour de callback
+  useEffect(() => {
+    // Recupere le statut (enabled / env) pour conditionner l'affichage du bouton
+    fetch('/api/fc/status').then(r => r.ok ? r.json() : null).then(setFcStatus).catch(() => {})
+
+    // Retour de callback FC : token en fragment (#token=...) ou erreur en query (?fc_error=...)
+    const params = new URLSearchParams(window.location.search)
+    const err = params.get('fc_error')
+    if (err) {
+      setFcError(err)
+      // Nettoie l'URL (on enleve les params fc_*)
+      const url = new URL(window.location.href)
+      url.searchParams.delete('fc_error')
+      url.searchParams.delete('nom')
+      url.searchParams.delete('detail')
+      window.history.replaceState({}, '', url.pathname + url.search)
+    }
+    if (params.get('fc_ok') === '1' && window.location.hash.includes('token=')) {
+      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+      const tok = hashParams.get('token')
+      if (tok) {
+        setToken(tok)
+        // Nettoie l'URL
+        window.history.replaceState({}, '', window.location.pathname)
+        // Charge le dossier
+        loadDossier(tok)
+      }
+    }
+  }, [])
 
   const authHeaders = () => ({ 'x-portail-token': token, 'Content-Type': 'application/json' })
 
@@ -3364,9 +3473,44 @@ function PortailCandidatPage() {
               <div style={{ textAlign: 'center', marginBottom: 36 }}>
                 <h1 style={{ color: '#fff', fontFamily: Fh, fontSize: 24, fontWeight: 800, margin: '0 0 10px', letterSpacing: '-0.03em' }}>Accédez à votre dossier</h1>
                 <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13.5, lineHeight: 1.6, margin: 0 }}>
-                  Identification par votre NUD et date de naissance.
+                  Identification par votre NUD et date de naissance, ou avec FranceConnect.
                 </p>
               </div>
+
+              {/* FranceConnect */}
+              {fcStatus && fcStatus.enabled && (
+                <div style={{ marginBottom: 18 }}>
+                  <a href="/api/fc/auth" style={{ textDecoration: 'none', display: 'block' }}>
+                    <div style={{ background: '#fff', borderRadius: 10, padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 14, cursor: 'pointer', transition: 'transform 0.15s', border: '2px solid #fff' }}
+                      onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
+                      onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}>
+                      <div style={{ width: 36, height: 36, borderRadius: 7, background: '#000091', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontFamily: 'Marianne, sans-serif', fontWeight: 800, fontSize: 14, letterSpacing: '-0.02em', flexShrink: 0 }}>FC</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: '#000091', fontFamily: Fh }}>Se connecter avec FranceConnect</div>
+                        <div style={{ fontSize: 11, color: '#5B6B85', marginTop: 2 }}>Identité certifiée par l'État · sans mot de passe</div>
+                      </div>
+                      <span style={{ color: '#000091', fontSize: 18 }}>→</span>
+                    </div>
+                  </a>
+                  {fcStatus.env === 'integ' && (
+                    <div style={{ textAlign: 'center', fontSize: 10.5, color: 'rgba(255,255,255,0.35)', marginTop: 6 }}>Environnement d'intégration — non-production</div>
+                  )}
+                </div>
+              )}
+
+              {fcStatus && fcStatus.enabled && (
+                <div style={{ textAlign: 'center', marginBottom: 18, color: 'rgba(255,255,255,0.4)', fontSize: 11.5, fontWeight: 600, letterSpacing: '0.05em' }}>— OU —</div>
+              )}
+
+              {fcError && (
+                <div style={{ padding: '10px 14px', background: 'rgba(220,38,38,0.15)', borderRadius: 8, border: '1px solid rgba(220,38,38,0.3)', fontSize: 12.5, color: '#FCA5A5', marginBottom: 14 }}>
+                  {fcError === 'no_dossier' && "FranceConnect vous a identifié mais aucun dossier de demande de logement n'a été trouvé. Vérifiez que vous avez bien une demande enregistrée, ou contactez la mairie."}
+                  {fcError === 'token_exchange' && 'Erreur de communication avec FranceConnect. Réessayez dans quelques instants.'}
+                  {fcError === 'userinfo' && "Impossible de récupérer vos informations auprès de FranceConnect."}
+                  {!['no_dossier', 'token_exchange', 'userinfo'].includes(fcError) && ('Erreur FranceConnect : ' + fcError)}
+                </div>
+              )}
+
               <form onSubmit={login}>
                 <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 14, padding: 26, border: '1px solid rgba(255,255,255,0.1)' }}>
                   <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Votre NUD</label>
@@ -4052,11 +4196,610 @@ function AppInner() {
           {active === 'messagerie' && <div style={{ flex: 1, overflowY: 'auto' }}><MessageriePage onOpenDemandeur={(id) => { setActive('demandeurs'); sessionStorage.setItem('logivia_open_dem', id) }} /></div>}
           {active === 'relances' && <div style={{ flex: 1, overflowY: 'auto' }}><RelancesPage onOpenDemandeur={(id) => { setActive('demandeurs'); sessionStorage.setItem('logivia_open_dem', id) }} /></div>}
           {active === 'ia-stats' && <div style={{ flex: 1, overflowY: 'auto' }}><IAStatsPage /></div>}
+          {active === 'contingents' && <div style={{ flex: 1, overflowY: 'auto' }}><ContingentsPage isDirecteur={user && user.role === 'directeur'} toast={toast} /></div>}
+          {active === 'decision-cal' && <div style={{ flex: 1, overflowY: 'auto' }}><DecisionCALPage toast={toast} user={user} /></div>}
+          {active === 'qualite' && <div style={{ flex: 1, overflowY: 'auto' }}><QualiteDonneesPage toast={toast} onOpenDemandeur={(id) => { setActive('demandeurs'); sessionStorage.setItem('logivia_open_dem', id) }} onOpenLogement={(id) => { setActive('logements'); sessionStorage.setItem('logivia_open_log', id) }} /></div>}
         </div>
       </div>
       {showChangePwd && <ChangePasswordModal onClose={() => setShowChangePwd(false)} />}
       <RealtimeTopBar />
       <AssistantIA setActive={setActive} />
+    </div>
+  )
+}
+
+// ===========================================================
+// CONTINGENTS — dashboard quotas + bilan + configuration
+// ===========================================================
+// Page dediee aux contingents reglementaires (Prefet DALO 25%,
+// Action Logement 25%, Ville 20%, Bailleur 30%...).
+// Affiche : config actuelle, bilan annuel, ecarts vs quota, alertes.
+
+function ContingentsPage({ isDirecteur, toast }) {
+  const [configs, setConfigs] = useState([])
+  const [bilan, setBilan] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [annee, setAnnee] = useState(new Date().getFullYear())
+  const [edit, setEdit] = useState(null) // config en cours d'edition
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const [cRes, bRes] = await Promise.all([
+        apiFetch('/api/contingents/config'),
+        apiFetch('/api/contingents/bilan?annee=' + annee)
+      ])
+      if (cRes.ok) setConfigs(await cRes.json())
+      if (bRes.ok) setBilan(await bRes.json())
+    } catch (e) {
+      toast && toast('Erreur chargement contingents : ' + e.message, 'error')
+    }
+    setLoading(false)
+  }
+
+  useEffect(() => { load() }, [annee])
+
+  const saveConfig = async () => {
+    if (!edit) return
+    try {
+      const r = await apiFetch('/api/contingents/config/' + encodeURIComponent(edit.nom), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          quota_pct: parseFloat(edit.quota_pct) || 0,
+          description: edit.description,
+          eligibilite: edit.eligibilite,
+          priorite: parseInt(edit.priorite) || 99,
+          couleur: edit.couleur,
+          obligatoire: !!edit.obligatoire,
+          __motif: edit.__motif || 'mise a jour config contingent'
+        })
+      })
+      if (!r.ok) {
+        const err = await r.json()
+        toast && toast(err.error || 'Erreur', 'error')
+        return
+      }
+      toast && toast('Contingent ' + edit.nom + ' mis a jour', 'success')
+      setEdit(null)
+      load()
+    } catch (e) {
+      toast && toast('Erreur : ' + e.message, 'error')
+    }
+  }
+
+  if (loading && !configs.length) return <Spin />
+
+  const totalQuota = configs.reduce((s, c) => s + (parseFloat(c.quota_pct) || 0), 0)
+
+  return (
+    <div style={{ padding: 28, fontFamily: Fb }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 }}>
+        <div>
+          <h1 style={{ fontFamily: Fh, fontSize: 22, fontWeight: 800, color: C.text, margin: '0 0 4px', letterSpacing: '-0.03em' }}>Contingents réglementaires</h1>
+          <p style={{ color: C.muted, fontSize: 12.5, margin: 0 }}>
+            Répartition des attributions entre réservataires (Préfet DALO, Action Logement, Ville, Bailleur)
+            {totalQuota !== 100 && <span style={{ color: C.amber, marginLeft: 10, fontWeight: 600 }}>⚠ Total des quotas : {totalQuota}% (recommandé : 100%)</span>}
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <select value={annee} onChange={e => setAnnee(parseInt(e.target.value))} style={{ padding: '7px 10px', borderRadius: 7, border: '1px solid ' + C.border, fontSize: 12.5, fontFamily: Fb, background: '#fff' }}>
+            {[0, 1, 2].map(i => {
+              const y = new Date().getFullYear() - i
+              return <option key={y} value={y}>{y}</option>
+            })}
+          </select>
+        </div>
+      </div>
+
+      {/* Bilan consolide */}
+      {bilan && (
+        <div style={{ background: '#fff', border: '1px solid ' + C.border, borderRadius: 10, padding: 18, marginBottom: 18 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
+            <h2 style={{ fontFamily: Fh, fontSize: 14, fontWeight: 700, color: C.text, margin: 0 }}>Bilan {bilan.annee}</h2>
+            <span style={{ fontSize: 12, color: C.muted }}>{bilan.total_attributions} attribution(s) enregistrée(s)</span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            {bilan.bilan.map(b => {
+              const statutColor = b.statut === 'conforme' ? C.green : b.statut === 'sous_utilise' ? C.amber : C.red
+              const statutLabel = b.statut === 'conforme' ? 'Conforme' : b.statut === 'sous_utilise' ? 'Sous-utilisé' : 'Sur-utilisé'
+              return (
+                <div key={b.nom} style={{ border: '1px solid ' + C.border, borderLeft: '4px solid ' + b.couleur, borderRadius: 8, padding: 14, background: '#fafbfc' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                    <div style={{ fontWeight: 700, color: C.text, fontSize: 13 }}>{b.nom}</div>
+                    <span style={{ fontSize: 10, background: statutColor, color: '#fff', padding: '2px 7px', borderRadius: 99, fontWeight: 700 }}>{statutLabel}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+                    <span style={{ fontSize: 20, fontWeight: 800, color: C.text }}>{b.pct_realise}%</span>
+                    <span style={{ fontSize: 11, color: C.muted }}>/ quota {b.quota_pct}%</span>
+                  </div>
+                  <div style={{ height: 6, background: C.border, borderRadius: 99, overflow: 'hidden', marginBottom: 6 }}>
+                    <div style={{ width: Math.min(100, (b.pct_realise / Math.max(1, b.quota_pct)) * 100) + '%', height: '100%', background: b.couleur, transition: 'width 0.3s' }} />
+                  </div>
+                  <div style={{ fontSize: 11, color: b.ecart < 0 ? C.amber : b.ecart > 0 ? C.blue : C.muted, fontWeight: 600 }}>
+                    {b.nb_attributions} attribution(s) · écart {b.ecart > 0 ? '+' : ''}{b.ecart}pt
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Configuration */}
+      <div style={{ background: '#fff', border: '1px solid ' + C.border, borderRadius: 10, overflow: 'hidden' }}>
+        <div style={{ padding: '14px 18px', borderBottom: '1px solid ' + C.border, display: 'flex', justifyContent: 'space-between' }}>
+          <h2 style={{ fontFamily: Fh, fontSize: 14, fontWeight: 700, color: C.text, margin: 0 }}>Configuration des contingents</h2>
+          <span style={{ fontSize: 11, color: C.muted }}>{isDirecteur ? 'Modifiable par le directeur' : 'Lecture seule'}</span>
+        </div>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+          <thead>
+            <tr style={{ background: '#f7f9fb', borderBottom: '1px solid ' + C.border }}>
+              <th style={{ textAlign: 'left', padding: '10px 14px', fontWeight: 700, color: C.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Contingent</th>
+              <th style={{ textAlign: 'center', padding: '10px 14px', fontWeight: 700, color: C.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Quota</th>
+              <th style={{ textAlign: 'center', padding: '10px 14px', fontWeight: 700, color: C.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Priorité</th>
+              <th style={{ textAlign: 'left', padding: '10px 14px', fontWeight: 700, color: C.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Critères d'éligibilité</th>
+              <th style={{ textAlign: 'left', padding: '10px 14px', fontWeight: 700, color: C.muted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Description</th>
+              {isDirecteur && <th style={{ padding: '10px 14px' }}></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {configs.map(c => (
+              <tr key={c.nom} style={{ borderBottom: '1px solid ' + C.border }}>
+                <td style={{ padding: '12px 14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: 99, background: c.couleur || '#666', display: 'inline-block' }} />
+                    <span style={{ fontWeight: 700, color: C.text }}>{c.nom}</span>
+                    {c.obligatoire && <span style={{ fontSize: 9, background: C.redBg, color: C.red, padding: '1px 6px', borderRadius: 99, fontWeight: 700 }}>OBLIGATOIRE</span>}
+                  </div>
+                </td>
+                <td style={{ padding: '12px 14px', textAlign: 'center', fontWeight: 700, color: C.text, fontSize: 13 }}>{c.quota_pct}%</td>
+                <td style={{ padding: '12px 14px', textAlign: 'center', color: C.muted }}>{c.priorite}</td>
+                <td style={{ padding: '12px 14px' }}>
+                  {(c.eligibilite || []).length === 0
+                    ? <span style={{ color: C.muted, fontStyle: 'italic' }}>— ouvert —</span>
+                    : <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                      {(c.eligibilite || []).map(e => (
+                        <span key={e} style={{ fontSize: 10, background: '#eef2f7', color: C.text, padding: '2px 7px', borderRadius: 99, fontWeight: 600 }}>{e}</span>
+                      ))}
+                    </div>}
+                </td>
+                <td style={{ padding: '12px 14px', color: C.muted, fontSize: 11.5, maxWidth: 320 }}>{c.description}</td>
+                {isDirecteur && (
+                  <td style={{ padding: '12px 14px', textAlign: 'right' }}>
+                    <button onClick={() => setEdit({ ...c })} style={{ padding: '5px 11px', fontSize: 11, borderRadius: 6, border: '1px solid ' + C.border, background: '#fff', cursor: 'pointer', fontWeight: 600, color: C.text }}>Modifier</button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Modal edition */}
+      {edit && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(11,30,61,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20 }} onClick={() => setEdit(null)}>
+          <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, width: '100%', maxWidth: 540, maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 20px 50px rgba(0,0,0,0.25)' }}>
+            <div style={{ padding: 18, borderBottom: '1px solid ' + C.border, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ fontFamily: Fh, fontSize: 15, fontWeight: 800, margin: 0, color: C.text }}>Modifier · {edit.nom}</h3>
+              <button onClick={() => setEdit(null)} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer', color: C.muted }}>×</button>
+            </div>
+            <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: 'uppercase' }}>Quota (%)</span>
+                <input type="number" min="0" max="100" step="0.5" value={edit.quota_pct} onChange={e => setEdit({ ...edit, quota_pct: e.target.value })} style={{ padding: '8px 10px', border: '1px solid ' + C.border, borderRadius: 6, fontSize: 13 }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: 'uppercase' }}>Priorité (1 = plus prioritaire)</span>
+                <input type="number" min="1" max="99" value={edit.priorite} onChange={e => setEdit({ ...edit, priorite: e.target.value })} style={{ padding: '8px 10px', border: '1px solid ' + C.border, borderRadius: 6, fontSize: 13 }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: 'uppercase' }}>Critères d'éligibilité (séparés par virgule)</span>
+                <input type="text" value={(edit.eligibilite || []).join(', ')} onChange={e => setEdit({ ...edit, eligibilite: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })} style={{ padding: '8px 10px', border: '1px solid ' + C.border, borderRadius: 6, fontSize: 13, fontFamily: 'monospace' }} placeholder="dalo, sans_log, violences..." />
+                <span style={{ fontSize: 10, color: C.muted }}>Flags reconnus : dalo, prio_expulsion, sans_log, violences, sortie_hebergement, salarie_cotisant, mutation_professionnelle, jeune_actif, habitant_commune, agent_ville, rsa, accompagnement_social, apprenti, etudiant_boursier</span>
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: 'uppercase' }}>Description</span>
+                <textarea rows={3} value={edit.description || ''} onChange={e => setEdit({ ...edit, description: e.target.value })} style={{ padding: '8px 10px', border: '1px solid ' + C.border, borderRadius: 6, fontSize: 12.5, fontFamily: Fb, resize: 'vertical' }} />
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
+                <input type="checkbox" checked={!!edit.obligatoire} onChange={e => setEdit({ ...edit, obligatoire: e.target.checked })} />
+                <span>Contingent obligatoire (quota légalement réservé)</span>
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: 'uppercase' }}>Motif de modification (trace audit)</span>
+                <input type="text" value={edit.__motif || ''} onChange={e => setEdit({ ...edit, __motif: e.target.value })} style={{ padding: '8px 10px', border: '1px solid ' + C.border, borderRadius: 6, fontSize: 13 }} placeholder="ex : actualisation convention préfet-bailleur 2026" />
+              </label>
+            </div>
+            <div style={{ padding: 14, borderTop: '1px solid ' + C.border, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button onClick={() => setEdit(null)} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid ' + C.border, background: '#fff', cursor: 'pointer', fontSize: 12.5 }}>Annuler</button>
+              <button onClick={saveConfig} style={{ padding: '8px 16px', borderRadius: 6, border: 'none', background: C.accent, color: '#fff', cursor: 'pointer', fontSize: 12.5, fontWeight: 700 }}>Enregistrer</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ===========================================================
+// MODE DECISION CAL DEDIE
+// Ecran par logement : Valider / Refuser avec motif / Mettre en attente
+// 3 boutons explicites + historisation + pre-remplissage top 1
+// ===========================================================
+
+function DecisionCALPage({ toast, user }) {
+  const [logements, setLogements] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState(null)       // id du logement choisi
+  const [matching, setMatching] = useState(null)       // resultat de /api/matching
+  const [loadMatch, setLoadMatch] = useState(false)
+  const [activeCand, setActiveCand] = useState(null)   // dem_id actif dans le panneau decision
+  const [motifs, setMotifs] = useState([])
+  const [motifChoisi, setMotifChoisi] = useState('')
+  const [commentaire, setCommentaire] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [historique, setHistorique] = useState([])
+
+  useEffect(() => {
+    let stop = false
+    async function run() {
+      setLoading(true)
+      try {
+        const [logs, moti] = await Promise.all([
+          api('/logements'),
+          api('/decision-cal/motifs')
+        ])
+        if (stop) return
+        setLogements((logs || []).filter(l => !l.statut || l.statut === 'vacant'))
+        setMotifs(moti || [])
+      } catch (e) {
+        if (!stop) toast('Erreur : ' + e.message, 'error')
+      } finally { if (!stop) setLoading(false) }
+    }
+    run()
+    return () => { stop = true }
+  }, [toast])
+
+  const loadMatching = useCallback(async (logId) => {
+    setLoadMatch(true)
+    setMatching(null)
+    setActiveCand(null)
+    try {
+      const [m, hist] = await Promise.all([
+        api('/matching/' + logId + '?strict=1'),
+        api('/decision-cal/logement/' + logId)
+      ])
+      setMatching(m)
+      setHistorique(hist || [])
+      // pre-selection : rang 1 conforme
+      const top = (m.eligible || m.conforme || []).find(x => x && x.dem) || null
+      if (top) setActiveCand(top.dem.id)
+    } catch (e) {
+      toast('Erreur matching : ' + e.message, 'error')
+    } finally { setLoadMatch(false) }
+  }, [toast])
+
+  useEffect(() => { if (selected) loadMatching(selected) }, [selected, loadMatching])
+
+  const candidats = matching ? ((matching.eligible || matching.conforme || [])) : []
+  const candidat = candidats.find(c => c && c.dem && c.dem.id === activeCand) || null
+  const logementInfo = matching ? matching.logement : null
+
+  const submitDecision = async (decision) => {
+    if (!matching || !candidat) return toast('Choisissez un candidat', 'warning')
+    if (decision === 'refuser' && !motifChoisi) {
+      return toast('Un motif est obligatoire pour un refus', 'warning')
+    }
+    setBusy(true)
+    try {
+      const res = await api('/decision-cal/' + matching.logement.id, {
+        method: 'POST',
+        body: {
+          decision,
+          dem_id: candidat.dem.id,
+          motif: decision === 'refuser' ? motifChoisi : '',
+          commentaire,
+          rang: candidat.rang || 1,
+          score: candidat.res ? candidat.res.total : 0
+        }
+      })
+      if (decision === 'valider') {
+        toast('Attribution enregistree - logement sorti du stock', 'success')
+        // on enleve ce logement de la liste
+        setLogements(prev => prev.filter(l => l.id !== matching.logement.id))
+        setSelected(null)
+        setMatching(null)
+      } else if (decision === 'refuser') {
+        toast('Refus enregistre avec motif : ' + motifChoisi, 'info')
+        loadMatching(selected)
+      } else {
+        toast('Candidat mis en attente', 'info')
+        loadMatching(selected)
+      }
+      setMotifChoisi('')
+      setCommentaire('')
+    } catch (e) { toast('Erreur : ' + e.message, 'error') }
+    finally { setBusy(false) }
+  }
+
+  if (loading) return <div style={{ padding: 28 }}><Spin /></div>
+
+  const confianceCouleur = { eleve: '#16A34A', moyen: '#D97706', risque: '#DC2626', undefined: '#64748B' }
+
+  return (
+    <div style={{ padding: 28, fontFamily: Fb }}>
+      <h1 style={{ fontFamily: Fh, fontSize: 22, fontWeight: 800, color: C.text, margin: '0 0 4px', letterSpacing: '-0.03em' }}>Mode Décision CAL</h1>
+      <p style={{ color: C.muted, fontSize: 12.5, marginBottom: 18 }}>Un logement, un candidat pre-selectionne, 3 decisions explicites. Chaque clic est tracé.</p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 18 }}>
+        {/* Colonne gauche : liste des logements vacants */}
+        <div style={{ background: C.card, borderRadius: 10, border: '1px solid ' + C.border, padding: 10, maxHeight: 'calc(100vh - 200px)', overflowY: 'auto' }}>
+          <h3 style={{ fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.muted, textTransform: 'uppercase', margin: '4px 8px 10px' }}>Logements vacants ({logements.length})</h3>
+          {logements.length === 0 && <div style={{ textAlign: 'center', color: C.muted, padding: 20, fontSize: 12 }}>Aucun logement vacant.</div>}
+          {logements.map(l => (
+            <button key={l.id} onClick={() => setSelected(l.id)}
+              style={{ display: 'block', width: '100%', textAlign: 'left', marginBottom: 4, padding: '9px 11px', borderRadius: 7,
+                       border: '1px solid ' + (selected === l.id ? C.accent : 'transparent'),
+                       background: selected === l.id ? '#FEF3E9' : 'transparent',
+                       cursor: 'pointer', fontFamily: Fb }}>
+              <div style={{ fontWeight: 700, fontSize: 12.5, color: C.text }}>{l.ref || l.id}</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{l.typ || '-'} · {l.quartier || '-'}</div>
+              <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2 }}>{(l.loyer || 0) + ' €'} · Contingent {l.contingent || 'Bailleur'}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* Colonne droite : panneau decision */}
+        <div>
+          {!selected && (
+            <div style={{ background: C.card, borderRadius: 10, border: '1px solid ' + C.border, padding: 40, textAlign: 'center', color: C.muted }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 6 }}>Sélectionnez un logement</div>
+              <div style={{ fontSize: 12 }}>Le meilleur candidat conforme au contingent s'affiche automatiquement.</div>
+            </div>
+          )}
+
+          {selected && loadMatch && <div style={{ padding: 24 }}><Spin /></div>}
+
+          {selected && !loadMatch && matching && (
+            <div>
+              {/* Bandeau logement */}
+              <div style={{ background: 'linear-gradient(135deg, #0B1E3D, #1B2F52)', color: '#fff', borderRadius: 12, padding: 18, marginBottom: 14 }}>
+                <div style={{ fontSize: 11, opacity: 0.8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Logement en decision</div>
+                <div style={{ fontFamily: Fh, fontSize: 20, fontWeight: 800, margin: '4px 0' }}>{logementInfo.ref} — {logementInfo.adresse || ''}</div>
+                <div style={{ fontSize: 12.5, opacity: 0.9 }}>
+                  {logementInfo.typ} · {logementInfo.quartier || '-'} · Loyer {logementInfo.loyer || 0} € · Contingent <b>{matching.logement_contingent}</b>
+                </div>
+              </div>
+
+              {/* Selecteur candidat */}
+              <div style={{ background: C.card, borderRadius: 10, border: '1px solid ' + C.border, padding: 14, marginBottom: 14 }}>
+                <div style={{ fontFamily: Fh, fontSize: 11, fontWeight: 700, color: C.muted, textTransform: 'uppercase', marginBottom: 8 }}>Candidats conformes (top 4)</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {candidats.slice(0, 6).map((c, i) => c && c.dem && (
+                    <button key={c.dem.id} onClick={() => setActiveCand(c.dem.id)}
+                      style={{ padding: '7px 12px', borderRadius: 6, cursor: 'pointer',
+                               border: '1px solid ' + (activeCand === c.dem.id ? C.accent : C.border),
+                               background: activeCand === c.dem.id ? '#FEF3E9' : '#fff',
+                               fontFamily: Fb, fontSize: 12 }}>
+                      <b>#{i + 1}</b> {c.dem.nom} {c.dem.prenom} — <b>{c.res.total}</b>
+                    </button>
+                  ))}
+                  {candidats.length === 0 && <div style={{ color: C.muted, fontSize: 12 }}>Aucun candidat conforme. Ouvrir le mode derogation dans Matching pour voir hors-contingent.</div>}
+                </div>
+              </div>
+
+              {/* Carte candidat actif */}
+              {candidat && (
+                <div style={{ background: C.card, borderRadius: 10, border: '1px solid ' + C.border, padding: 18, marginBottom: 14 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: 18 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 11, color: C.muted, textTransform: 'uppercase', fontWeight: 700 }}>Rang #{candidat.rang || 1}</div>
+                      <div style={{ fontFamily: Fh, fontSize: 18, fontWeight: 800, color: C.text, margin: '4px 0' }}>{candidat.dem.nom} {candidat.dem.prenom}</div>
+                      <div style={{ fontSize: 12, color: C.muted }}>
+                        NUD {candidat.dem.nud || '-'} · {candidat.dem.adultes || 0} adulte(s), {candidat.dem.enfants || 0} enfant(s) · Revenu {candidat.dem.rev || 0} € · Taux effort <b>{candidat.res.te}%</b>
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontFamily: Fh, fontSize: 36, fontWeight: 900, color: candidat.res.total >= 75 ? '#16A34A' : candidat.res.total >= 55 ? '#D97706' : '#DC2626' }}>{candidat.res.total}</div>
+                      <div style={{ fontSize: 10, color: C.muted, textTransform: 'uppercase' }}>Score</div>
+                      {candidat.res.confiance && (
+                        <div style={{ marginTop: 6, padding: '3px 9px', borderRadius: 20, background: confianceCouleur[candidat.res.confiance] + '20', color: confianceCouleur[candidat.res.confiance], fontSize: 11, fontWeight: 700, display: 'inline-block' }}>
+                          Confiance {candidat.res.confiance}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {candidat.res.confiance_raisons && candidat.res.confiance_raisons.length > 0 && (
+                    <div style={{ marginTop: 8, fontSize: 11.5, color: C.muted, fontStyle: 'italic' }}>
+                      {candidat.res.confiance_raisons.join(' · ')}
+                    </div>
+                  )}
+                  {candidat.res.bonus_malus && candidat.res.bonus_malus.length > 0 && (
+                    <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {candidat.res.bonus_malus.map((bm, i) => (
+                        <span key={i} style={{ padding: '3px 8px', borderRadius: 4, fontSize: 10.5, fontWeight: 600, background: bm.type === 'bonus' ? '#DCFCE7' : '#FEE2E2', color: bm.type === 'bonus' ? '#166534' : '#991B1B' }}>{bm.msg}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Zone decision : 3 boutons explicites */}
+              {candidat && (
+                <div style={{ background: C.card, borderRadius: 10, border: '2px solid ' + C.accent, padding: 18, marginBottom: 14 }}>
+                  <div style={{ fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.muted, textTransform: 'uppercase', marginBottom: 12 }}>Décision CAL pour {candidat.dem.nom} {candidat.dem.prenom}</div>
+
+                  <div style={{ marginBottom: 12 }}>
+                    <label style={{ fontSize: 11.5, color: C.muted, display: 'block', marginBottom: 4 }}>Motif (obligatoire en cas de refus)</label>
+                    <select value={motifChoisi} onChange={e => setMotifChoisi(e.target.value)}
+                      style={{ width: '100%', padding: '8px 10px', border: '1px solid ' + C.border, borderRadius: 7, fontSize: 13 }}>
+                      <option value="">— Choisir un motif —</option>
+                      {motifs.map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                  </div>
+
+                  <div style={{ marginBottom: 14 }}>
+                    <label style={{ fontSize: 11.5, color: C.muted, display: 'block', marginBottom: 4 }}>Commentaire (facultatif, visible au PV)</label>
+                    <textarea value={commentaire} onChange={e => setCommentaire(e.target.value)} rows={2}
+                      style={{ width: '100%', padding: '8px 10px', border: '1px solid ' + C.border, borderRadius: 7, fontSize: 13, fontFamily: Fb, resize: 'vertical' }}
+                      placeholder="Precisez le contexte..." />
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 10 }}>
+                    <button disabled={busy} onClick={() => submitDecision('valider')}
+                      style={{ flex: 1, padding: '12px 14px', borderRadius: 8, border: 'none', background: '#16A34A', color: '#fff', fontWeight: 800, fontSize: 13, cursor: busy ? 'wait' : 'pointer', fontFamily: Fh, letterSpacing: '0.02em' }}>
+                      ✓ VALIDER L'ATTRIBUTION
+                    </button>
+                    <button disabled={busy || !motifChoisi} onClick={() => submitDecision('refuser')}
+                      style={{ flex: 1, padding: '12px 14px', borderRadius: 8, border: 'none', background: (!motifChoisi || busy) ? '#FCA5A5' : '#DC2626', color: '#fff', fontWeight: 800, fontSize: 13, cursor: (!motifChoisi || busy) ? 'not-allowed' : 'pointer', fontFamily: Fh, letterSpacing: '0.02em' }}>
+                      ✗ REFUSER AVEC MOTIF
+                    </button>
+                    <button disabled={busy} onClick={() => submitDecision('attente')}
+                      style={{ flex: 1, padding: '12px 14px', borderRadius: 8, border: 'none', background: '#D97706', color: '#fff', fontWeight: 800, fontSize: 13, cursor: busy ? 'wait' : 'pointer', fontFamily: Fh, letterSpacing: '0.02em' }}>
+                      ⏸ METTRE EN ATTENTE
+                    </button>
+                  </div>
+
+                  <div style={{ marginTop: 10, fontSize: 10.5, color: C.muted, textAlign: 'center' }}>
+                    Chaque décision est horodatée, attribuée à {user ? (user.prenom + ' ' + user.nom) : 'vous'}, et ajoutée au parcours du candidat + audit log.
+                  </div>
+                </div>
+              )}
+
+              {/* Historique decisions pour ce logement */}
+              <div style={{ background: C.card, borderRadius: 10, border: '1px solid ' + C.border, padding: 14 }}>
+                <div style={{ fontFamily: Fh, fontSize: 11, fontWeight: 700, color: C.muted, textTransform: 'uppercase', marginBottom: 8 }}>Historique de ce logement ({historique.length})</div>
+                {historique.length === 0 && <div style={{ fontSize: 12, color: C.muted, fontStyle: 'italic' }}>Aucune décision antérieure.</div>}
+                {historique.map(h => (
+                  <div key={h.id} style={{ padding: '8px 10px', borderRadius: 6, background: C.bg, marginBottom: 4, fontSize: 12 }}>
+                    <div><b>{h.date_cal}</b> {h.heure_cal ? ' ' + h.heure_cal : ''} — par {h.agent_nom} ({h.agent_role})</div>
+                    {h.candidats && h.candidats[0] && (
+                      <div style={{ color: C.muted, marginTop: 2 }}>
+                        {h.type_decision ? <span style={{ fontWeight: 700, color: h.type_decision === 'valider' ? '#16A34A' : h.type_decision === 'refuser' ? '#DC2626' : '#D97706' }}>{h.type_decision.toUpperCase()}</span> : ''} · {h.candidats[0].nom} · {h.candidats[0].motif || h.candidats[0].decision || ''}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ===========================================================
+// QUALITE DES DONNEES
+// Detection automatique de doublons, dossiers incomplets,
+// incoherences revenu/composition, taux d effort dangereux,
+// logements sans typologie, candidats sans date demande.
+// ===========================================================
+
+function QualiteDonneesPage({ toast, onOpenDemandeur, onOpenLogement }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [expanded, setExpanded] = useState({})
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try { setData(await api('/qualite-donnees')) }
+    catch (e) { toast('Erreur : ' + e.message, 'error') }
+    finally { setLoading(false) }
+  }, [toast])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <div style={{ padding: 28 }}><Spin /></div>
+  if (!data) return <div style={{ padding: 28 }}>Erreur de chargement</div>
+
+  const CATS = [
+    { key: 'doublons_candidats', label: 'Doublons candidats', couleur: '#DC2626', desc: 'Même nom + prénom + date de naissance' },
+    { key: 'dossiers_incomplets', label: 'Dossiers incomplets', couleur: '#D97706', desc: 'Pièces justificatives manquantes' },
+    { key: 'incoherences_revenu', label: 'Incohérences revenu / composition', couleur: '#DC2626', desc: 'Revenu manifestement irréaliste' },
+    { key: 'taux_effort_dangereux', label: 'Taux d\'effort dangereux', couleur: '#D97706', desc: 'Simulation > 40% sur T2 moyen (500€)' },
+    { key: 'logements_sans_typologie', label: 'Logements sans typologie', couleur: '#DC2626', desc: 'Impossible à proposer au matching' },
+    { key: 'candidats_sans_date', label: 'Candidats sans date de demande', couleur: '#D97706', desc: 'Calcul d\'ancienneté impossible' },
+    { key: 'logements_sans_loyer', label: 'Logements sans loyer', couleur: '#D97706', desc: 'Taux d\'effort incalculable' },
+    { key: 'candidats_sans_souhait', label: 'Candidats sans quartier/secteur souhaité', couleur: '#64748B', desc: 'Score de localisation minimal' }
+  ]
+
+  const total = data.total_anomalies || 0
+
+  return (
+    <div style={{ padding: 28, fontFamily: Fb }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <h1 style={{ fontFamily: Fh, fontSize: 22, fontWeight: 800, color: C.text, margin: 0, letterSpacing: '-0.03em' }}>Qualité des données</h1>
+        <button onClick={load} style={{ padding: '8px 14px', border: '1px solid ' + C.border, borderRadius: 7, background: '#fff', cursor: 'pointer', fontFamily: Fh, fontSize: 12, fontWeight: 600 }}>Rafraîchir</button>
+      </div>
+      <p style={{ color: C.muted, fontSize: 12.5, marginBottom: 18 }}>
+        {total === 0 ? 'Aucune anomalie détectée — base saine.' : total + ' anomalie(s) détectée(s).'} Dernier calcul : {new Date(data.date_calcul).toLocaleString('fr-FR')}
+      </p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10, marginBottom: 18 }}>
+        {CATS.map(cat => {
+          const bloc = data.categories[cat.key] || { nb: 0, items: [] }
+          return (
+            <div key={cat.key} style={{ background: C.card, borderRadius: 10, border: '1px solid ' + C.border, padding: 14, borderLeft: '4px solid ' + cat.couleur }}>
+              <div style={{ fontFamily: Fh, fontSize: 26, fontWeight: 900, color: bloc.nb > 0 ? cat.couleur : '#64748B' }}>{bloc.nb}</div>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: C.text, marginTop: 2 }}>{cat.label}</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{cat.desc}</div>
+            </div>
+          )
+        })}
+      </div>
+
+      {CATS.map(cat => {
+        const bloc = data.categories[cat.key] || { nb: 0, items: [] }
+        if (bloc.nb === 0) return null
+        const open = !!expanded[cat.key]
+        return (
+          <div key={cat.key} style={{ background: C.card, borderRadius: 10, border: '1px solid ' + C.border, marginBottom: 10 }}>
+            <button onClick={() => setExpanded(p => ({ ...p, [cat.key]: !open }))}
+              style={{ width: '100%', padding: '12px 16px', background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontFamily: Fb }}>
+              <div>
+                <div style={{ fontFamily: Fh, fontSize: 13.5, fontWeight: 800, color: cat.couleur, textAlign: 'left' }}>{cat.label}</div>
+                <div style={{ fontSize: 11.5, color: C.muted, textAlign: 'left' }}>{bloc.nb} entrée(s)</div>
+              </div>
+              <div style={{ fontSize: 18, color: C.muted }}>{open ? '−' : '+'}</div>
+            </button>
+            {open && (
+              <div style={{ padding: '0 16px 14px' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <tbody>
+                    {bloc.items.map((it, idx) => (
+                      <tr key={idx} style={{ borderTop: '1px solid ' + C.border }}>
+                        <td style={{ padding: '8px 4px', fontWeight: 600, color: C.text }}>
+                          {it.nom || it.ref || it.signature || (it.candidats && it.candidats.map(c => c.nom + ' ' + c.prenom).join(' / '))}
+                        </td>
+                        <td style={{ padding: '8px 4px', color: C.muted, fontSize: 11.5 }}>
+                          {it.detail || (it.taux_effort_simu ? 'Taux ' + it.taux_effort_simu + '%' : '') || (it.nud ? 'NUD ' + it.nud : '') || (it.ref ? 'Ref ' + it.ref : '') || (it.candidats ? it.nb + ' candidats identiques' : '')}
+                        </td>
+                        <td style={{ padding: '8px 4px', textAlign: 'right' }}>
+                          {(it.id && onOpenDemandeur && (cat.key.includes('candidats') || cat.key === 'dossiers_incomplets' || cat.key === 'incoherences_revenu' || cat.key === 'taux_effort_dangereux' || cat.key === 'candidats_sans_date' || cat.key === 'candidats_sans_souhait')) && (
+                            <button onClick={() => onOpenDemandeur(it.id)} style={{ padding: '5px 10px', fontSize: 11, border: '1px solid ' + C.border, borderRadius: 5, background: '#fff', cursor: 'pointer' }}>Ouvrir</button>
+                          )}
+                          {(it.id && onOpenLogement && cat.key.includes('logements')) && (
+                            <button onClick={() => onOpenLogement(it.id)} style={{ padding: '5px 10px', fontSize: 11, border: '1px solid ' + C.border, borderRadius: 5, background: '#fff', cursor: 'pointer' }}>Ouvrir</button>
+                          )}
+                          {it.candidats && it.candidats.length > 0 && onOpenDemandeur && (
+                            <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                              {it.candidats.map(c => (
+                                <button key={c.id} onClick={() => onOpenDemandeur(c.id)} style={{ padding: '4px 8px', fontSize: 10.5, border: '1px solid ' + C.border, borderRadius: 5, background: '#fff', cursor: 'pointer' }}>{c.nom.slice(0, 10)}</button>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

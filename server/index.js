@@ -50,6 +50,7 @@ import {
   closeDatabase as dbClose
 } from './db.js'
 import { answerQuery as aiAnswer, answerWithLLM as aiLlm } from './ai.js'
+import { mountFranceConnect } from './franceconnect.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -643,6 +644,149 @@ const SEED_974 = {
   contingents: ['Ville', 'Prefecture', 'Action Logement', 'Bailleur', 'Departement', 'Region']
 }
 
+// ============================================================
+// CONTINGENTS — configuration réglementaire (quotas, éligibilité)
+// Réf : CCH L.441-1, L.313-26 (Action Logement), convention prefet-bailleur
+// Stocké dans referentiels.json sous la cle "contingents_config".
+// ============================================================
+
+const CONTINGENTS_CONFIG_974 = [
+  {
+    nom: 'Prefecture',
+    quota_pct: 25,
+    description: 'Contingent prefectoral - 25% reserve aux menages prioritaires DALO et sortants de structures (CCH L.441-1)',
+    eligibilite: ['dalo', 'prio_expulsion', 'sans_log', 'violences', 'sortie_hebergement'],
+    priorite: 1,
+    couleur: '#b71c1c',
+    obligatoire: true
+  },
+  {
+    nom: 'Action Logement',
+    quota_pct: 25,
+    description: '1% patronal - reserve aux salaries d entreprises cotisantes (>10 salaries, secteur prive)',
+    eligibilite: ['salarie_cotisant', 'mutation_professionnelle', 'jeune_actif'],
+    priorite: 2,
+    couleur: '#1565c0',
+    obligatoire: false
+  },
+  {
+    nom: 'Ville',
+    quota_pct: 20,
+    description: 'Contingent communal - habitants de la commune, agents, priorites municipales',
+    eligibilite: ['habitant_commune', 'agent_ville', 'attache_territoire'],
+    priorite: 3,
+    couleur: '#6a1b9a',
+    obligatoire: false
+  },
+  {
+    nom: 'Bailleur',
+    quota_pct: 30,
+    description: 'Part reservee au bailleur - candidats libres, mutations internes, gestion du parc',
+    eligibilite: [],
+    priorite: 4,
+    couleur: '#2e7d32',
+    obligatoire: false
+  },
+  {
+    nom: 'Departement',
+    quota_pct: 0,
+    description: 'Contingent departemental (optionnel) - publics sociaux accompagnes',
+    eligibilite: ['rsa', 'accompagnement_social'],
+    priorite: 5,
+    couleur: '#ef6c00',
+    obligatoire: false
+  },
+  {
+    nom: 'Region',
+    quota_pct: 0,
+    description: 'Contingent regional (optionnel) - jeunes, apprentis, etudiants boursiers',
+    eligibilite: ['jeune_actif', 'apprenti', 'etudiant_boursier'],
+    priorite: 6,
+    couleur: '#00838f',
+    obligatoire: false
+  }
+]
+
+/**
+ * S'assure que la config des contingents est presente dans referentiels.json.
+ * Appelee au demarrage (bootstrapReferentiels) + via sync.
+ * Ne touche PAS aux modifications faites par l'admin (merge prudent).
+ */
+function ensureContingentsConfig() {
+  const ref = readObj('referentiels.json', {})
+  let changed = false
+  if (!Array.isArray(ref.contingents_config)) {
+    ref.contingents_config = []
+    changed = true
+  }
+  // Ajoute les entrees manquantes (sans ecraser si deja personnalisees)
+  for (const seed of CONTINGENTS_CONFIG_974) {
+    const existing = ref.contingents_config.find(c => c.nom === seed.nom)
+    if (!existing) {
+      ref.contingents_config.push({ ...seed })
+      changed = true
+    }
+  }
+  // Garantit aussi la liste plate contingents (backward compat)
+  if (!Array.isArray(ref.contingents)) ref.contingents = []
+  for (const c of CONTINGENTS_CONFIG_974) {
+    if (!ref.contingents.includes(c.nom)) {
+      ref.contingents.push(c.nom)
+      changed = true
+    }
+  }
+  if (changed) writeData('referentiels.json', ref)
+  return ref.contingents_config
+}
+
+/**
+ * Calcule les contingents pour lesquels un demandeur est eligible,
+ * en se basant sur son profil (flags + champs libres).
+ * Renvoie un array de noms, classes par priorite croissante.
+ */
+function computeContingentsEligibles(dem, configs) {
+  if (!dem) return []
+  const cfg = configs && configs.length ? configs : CONTINGENTS_CONFIG_974
+  const flags = new Set()
+
+  // Mapping flags metier -> clefs eligibilite
+  if (dem.dalo) flags.add('dalo')
+  if (dem.prio_expulsion || dem.expulsion) flags.add('prio_expulsion')
+  if (dem.sans_log) flags.add('sans_log')
+  if (dem.violences) flags.add('violences')
+  if (dem.sortie_hebergement || dem.hebergement) flags.add('sortie_hebergement')
+  if (dem.mutation_pro || dem.mutation_professionnelle) flags.add('mutation_professionnelle')
+  if (dem.salarie_cotisant || dem.salarie_1pc || dem.action_logement) flags.add('salarie_cotisant')
+  if (dem.jeune_actif || (parseInt(dem.age) > 0 && parseInt(dem.age) < 30)) flags.add('jeune_actif')
+  if (dem.habitant_commune || dem.commune_demandeur === 'Saint-Denis') flags.add('habitant_commune')
+  if (dem.agent_ville || dem.agent_commune) flags.add('agent_ville')
+  if (dem.attache_territoire) flags.add('attache_territoire')
+  if (dem.rsa || dem.ressources_type === 'RSA') flags.add('rsa')
+  if (dem.accompagnement_social || dem.suivi_social) flags.add('accompagnement_social')
+  if (dem.apprenti) flags.add('apprenti')
+  if (dem.etudiant_boursier) flags.add('etudiant_boursier')
+
+  const eligibles = []
+  for (const c of cfg) {
+    // Pas de criteres = ouvert a tous (ex: Bailleur)
+    if (!c.eligibilite || c.eligibilite.length === 0) {
+      eligibles.push(c.nom)
+      continue
+    }
+    // Au moins un critere coche
+    if (c.eligibilite.some(k => flags.has(k))) {
+      eligibles.push(c.nom)
+    }
+  }
+  // Tri par priorite (configuree)
+  eligibles.sort((a, b) => {
+    const pa = (cfg.find(x => x.nom === a) || {}).priorite || 99
+    const pb = (cfg.find(x => x.nom === b) || {}).priorite || 99
+    return pa - pb
+  })
+  return eligibles
+}
+
 app.post('/api/admin/sync-referentiels', requireAuth, requireRole('directeur'), (req, res) => {
   const mode = (req.body && req.body.mode) || 'merge'
   const ref = readObj('referentiels.json', {})
@@ -665,10 +809,122 @@ app.post('/api/admin/sync-referentiels', requireAuth, requireRole('directeur'), 
     ref.typologies = ['T1', 'T2', 'T3', 'T4', 'T5', 'T6']
   }
 
+  // Bootstrap config contingents (ajout uniquement si manquant)
+  if (!Array.isArray(ref.contingents_config)) ref.contingents_config = []
+  for (const seed of CONTINGENTS_CONFIG_974) {
+    if (!ref.contingents_config.find(c => c.nom === seed.nom)) {
+      ref.contingents_config.push({ ...seed })
+    }
+  }
+
   const changed = JSON.stringify(ref) !== before
   if (changed) writeData('referentiels.json', ref)
   addLog(req.user, 'SYNC_REF_974', mode + (changed ? ' (updated)' : ' (noop)'))
   res.json({ ok: true, mode, changed, referentiels: ref })
+})
+
+// ============================================================
+// CONTINGENTS — endpoints config + eligibilite + bilan
+// ============================================================
+
+// Lecture de la config (accessible a tous les connectes pour affichage)
+app.get('/api/contingents/config', requireAuth, (req, res) => {
+  const configs = ensureContingentsConfig()
+  res.json(configs)
+})
+
+// Mise a jour d'un contingent (directeur uniquement)
+app.put('/api/contingents/config/:nom', requireAuth, requireRole('directeur'), (req, res) => {
+  const nom = decodeURIComponent(req.params.nom)
+  const ref = readObj('referentiels.json', {})
+  if (!Array.isArray(ref.contingents_config)) ref.contingents_config = []
+  const idx = ref.contingents_config.findIndex(c => c.nom === nom)
+  if (idx === -1) return res.status(404).json({ error: 'Contingent non trouve' })
+
+  const { __motif, ...patch } = req.body || {}
+  const before = { ...ref.contingents_config[idx] }
+  // Champs modifiables uniquement (pas le nom)
+  const allowedKeys = ['quota_pct', 'description', 'eligibilite', 'priorite', 'couleur', 'obligatoire']
+  for (const k of allowedKeys) {
+    if (patch[k] !== undefined) ref.contingents_config[idx][k] = patch[k]
+  }
+  const changes = diff(before, ref.contingents_config[idx])
+  writeData('referentiels.json', ref)
+  addLog(req.user, 'UPDATE_CONTINGENT', nom + (__motif ? ' - ' + __motif : ''))
+  if (changes.length > 0) {
+    addAudit(req.user, 'contingent', nom, nom, 'modification', changes, __motif || '')
+  }
+  res.json(ref.contingents_config[idx])
+})
+
+// Contingents eligibles pour un demandeur donne
+app.get('/api/demandeurs/:id/contingents', requireAuth, (req, res) => {
+  const d = readData('demandeurs.json')
+  const dem = d.find(x => x.id === req.params.id)
+  if (!dem) return res.status(404).json({ error: 'Demandeur non trouve' })
+  const configs = ensureContingentsConfig()
+  const eligibles = computeContingentsEligibles(dem, configs)
+  res.json({
+    demandeur_id: dem.id,
+    demandeur_nom: dem.nom + ' ' + dem.prenom,
+    contingents_eligibles: eligibles,
+    details: eligibles.map(nom => configs.find(c => c.nom === nom)).filter(Boolean)
+  })
+})
+
+// Bilan global : consommation par contingent sur une periode
+app.get('/api/contingents/bilan', requireAuth, (req, res) => {
+  const configs = ensureContingentsConfig()
+  const decisions = readData('decisions_cal.json')
+  const logements = readData('logements.json')
+  const annee = parseInt(req.query.annee) || new Date().getFullYear()
+
+  // Filtre decisions de l'annee avec une attribution (rang 1 retenu)
+  const decisionsAnnee = decisions.filter(d => {
+    try {
+      const dt = new Date(d.date_cal)
+      return dt.getFullYear() === annee
+    } catch { return false }
+  })
+  const attributions = []
+  for (const d of decisionsAnnee) {
+    const rang1 = (d.candidats || []).find(c => c.decision && String(c.decision).includes('Retenu rang 1'))
+    if (!rang1) continue
+    const log = logements.find(l => l.id === d.logement_id) || {}
+    attributions.push({
+      date_cal: d.date_cal,
+      logement_id: d.logement_id,
+      logement_ref: d.logement_ref,
+      contingent: log.contingent || 'Bailleur',
+      dem_id: rang1.dem_id,
+      dem_nom: rang1.nom || ''
+    })
+  }
+
+  // Comptage par contingent
+  const totalAttributions = attributions.length || 1 // evite div/0
+  const bilan = configs.map(cfg => {
+    const attribs = attributions.filter(a => a.contingent === cfg.nom)
+    const pct_realise = Math.round((attribs.length / totalAttributions) * 1000) / 10
+    const ecart = Math.round((pct_realise - cfg.quota_pct) * 10) / 10
+    return {
+      nom: cfg.nom,
+      quota_pct: cfg.quota_pct,
+      pct_realise,
+      ecart,
+      nb_attributions: attribs.length,
+      statut: ecart < -5 ? 'sous_utilise' : ecart > 5 ? 'sur_utilise' : 'conforme',
+      couleur: cfg.couleur || '#666',
+      attributions: attribs.slice(0, 10) // echantillon
+    }
+  })
+
+  res.json({
+    annee,
+    total_attributions: attributions.length,
+    bilan,
+    generated_at: new Date().toISOString()
+  })
 })
 
 app.get('/api/elus', requireAuth, (req, res) => {
@@ -806,6 +1062,7 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
     ? Math.round(avecDelai.reduce((s, a) => s + a.jours_total, 0) / avecDelai.length)
     : null
 
+  // Demande par quartier (candidats qui souhaitent ce quartier)
   const parQuartier = {}
   actifs.forEach(d => {
     (d.quartiers || []).forEach(q => {
@@ -813,6 +1070,34 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
     })
   })
 
+  // Offre par quartier (logements vacants disponibles)
+  const offreParQuartier = {}
+  vacants.forEach(l => {
+    if (l.quartier) offreParQuartier[l.quartier] = (offreParQuartier[l.quartier] || 0) + 1
+  })
+
+  // Pression par typologie T1 -> T5 (demande / offre)
+  const typs = ['T1', 'T2', 'T3', 'T4', 'T5']
+  const pressionParTyp = typs.map(t => {
+    const demande = actifs.filter(d => d.typ_v === t).length
+    const offre = vacants.filter(l => l.typ === t).length
+    const ratio = offre > 0 ? demande / offre : demande > 0 ? 999 : 0
+    const couleur = ratio === 0 ? 'gris' : ratio < 2 ? 'vert' : ratio < 5 ? 'orange' : 'rouge'
+    return { typ: t, demande, offre, ratio: Math.round(ratio * 10) / 10, couleur }
+  })
+
+  // Tension par quartier avec code couleur vert/orange/rouge
+  // Fondee sur le ratio demande / offre specifique au quartier
+  const tensionQuartiers = Object.entries(parQuartier)
+    .map(([quartier, demande]) => {
+      const offre = offreParQuartier[quartier] || 0
+      const ratio = offre > 0 ? demande / offre : demande > 0 ? 999 : 0
+      const couleur = ratio === 0 ? 'gris' : ratio < 2 ? 'vert' : ratio < 5 ? 'orange' : 'rouge'
+      return { quartier, nb: demande, demande, offre, ratio: Math.round(ratio * 10) / 10, couleur }
+    })
+    .sort((a, b) => b.demande - a.demande)
+
+  // Format compat ancien front (juste demande par typologie agregee)
   const parTyp = {
     T1: actifs.filter(d => d.typ_v === 'T1').length,
     T2: actifs.filter(d => d.typ_v === 'T2').length,
@@ -830,10 +1115,9 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
     nb_attribues: attribues.length,
     nb_notifications_non_lues: notifications.filter(n => !n.lu).length,
     delai_moyen: delaiMoyen,
-    tension_par_quartier: Object.entries(parQuartier)
-      .sort((a, b) => b[1] - a[1])
-      .map(([quartier, nb]) => ({ quartier, nb })),
-    tension_par_typ: parTyp
+    tension_par_quartier: tensionQuartiers,
+    tension_par_typ: parTyp,
+    pression_par_typ: pressionParTyp
   })
 })
 
@@ -1110,6 +1394,28 @@ function computeScore(dem, log, biais) {
 
   const total = Math.min(Math.max(base + bonus - malus, 0), 100)
 
+  // Indice de confiance du score : eleve / moyen / risque
+  // Base sur : score brut + completude dossier + historique refus non motives
+  // Permet a la CAL de voir en un coup d oeil si un score eleve est "solide" ou "fragile"
+  let niveauConfiance = 'moyen'
+  const raisonsConfiance = []
+
+  if (total >= 75 && dem.pieces && hb.nb_refus_non_motives === 0) {
+    niveauConfiance = 'eleve'
+    raisonsConfiance.push('Score eleve')
+    raisonsConfiance.push('Dossier complet')
+    raisonsConfiance.push('Aucun refus historique')
+  } else if (total < 50 || hb.nb_refus_non_motives >= 2 || !dem.pieces) {
+    niveauConfiance = 'risque'
+    if (total < 50) raisonsConfiance.push('Score faible (<50)')
+    if (!dem.pieces) raisonsConfiance.push('Dossier incomplet')
+    if (hb.nb_refus_non_motives >= 2) raisonsConfiance.push(hb.nb_refus_non_motives + ' refus non motives')
+  } else {
+    raisonsConfiance.push('Score intermediaire')
+    if (hb.nb_refus_non_motives === 1) raisonsConfiance.push('1 refus historique')
+    if (!dem.pieces) raisonsConfiance.push('Dossier a completer')
+  }
+
   return {
     eligible: true,
     excl: [],
@@ -1117,7 +1423,9 @@ function computeScore(dem, log, biais) {
     te: te.toFixed(1),
     base,
     scores: { typ: sTyp, comp: sComp, taux: sTaux, anc: sAnc, urg: sUrg, loc: sLoc, prio: sPrio, dos: sDos },
-    bonus_malus: bm
+    bonus_malus: bm,
+    confiance: niveauConfiance,
+    confiance_raisons: raisonsConfiance
   }
 }
 
@@ -1130,33 +1438,58 @@ app.get('/api/matching/:logement_id', requireAuth, (req, res) => {
   const demandeurs = readData('demandeurs.json')
   const ref = readObj('referentiels.json', {})
   const biais = ref.historique_biais || {}
+  const contingentsCfg = Array.isArray(ref.contingents_config) && ref.contingents_config.length
+    ? ref.contingents_config
+    : CONTINGENTS_CONFIG_974
 
   const log = logements.find(l => l.id === req.params.logement_id)
   if (!log) return res.status(404).json({ error: 'Logement non trouve' })
 
-  const actifs = demandeurs.filter(d => d.statut === 'active')
-  const results = actifs.map(dem => ({ dem, res: computeScore(dem, log, biais) }))
+  const logementContingent = log.contingent || 'Bailleur'
+  // Mode strict par defaut (on peut desactiver via ?strict=0 pour voir tous les candidats)
+  const strictContingent = req.query.strict !== '0' && req.query.strict !== 'false'
 
-  const eligible = results
-    .filter(x => x.res.eligible)
+  const actifs = demandeurs.filter(d => d.statut === 'active')
+  const results = actifs.map(dem => {
+    const scoring = computeScore(dem, log, biais)
+    const eligiblesDem = computeContingentsEligibles(dem, contingentsCfg)
+    const matchContingent = eligiblesDem.includes(logementContingent)
+    return { dem, res: scoring, contingents_eligibles: eligiblesDem, match_contingent: matchContingent }
+  })
+
+  // En mode strict : les candidats non-eligibles au contingent sont ranges en "hors_contingent"
+  // (pas exclus definitivement - la CAL peut deroger mais doit le justifier)
+  const conforme = results
+    .filter(x => x.res.eligible && (!strictContingent || x.match_contingent))
     .sort((a, b) => b.res.total - a.res.total)
     .map((x, i) => ({ ...x, rang: i + 1, top4: i < 4 }))
+
+  const horsContingent = results
+    .filter(x => x.res.eligible && !x.match_contingent)
+    .sort((a, b) => b.res.total - a.res.total)
 
   const ineligible = results.filter(x => !x.res.eligible)
 
   const audiences = readData('audiences.json')
 
-  addLog(req.user, 'MATCHING', 'Logement ' + log.ref + ' - ' + eligible.length + ' eligibles')
+  addLog(req.user, 'MATCHING', 'Logement ' + log.ref + ' [' + logementContingent + '] - ' + conforme.length + ' eligibles conformes')
 
   res.json({
     logement: log,
-    eligible,
+    logement_contingent: logementContingent,
+    strict_contingent: strictContingent,
+    // API retro-compat : eligible = candidats conformes au contingent si strict, tous sinon
+    eligible: strictContingent ? conforme : [...conforme, ...horsContingent.map((x, i) => ({ ...x, rang: conforme.length + i + 1, top4: false }))],
+    conforme_contingent: conforme,
+    hors_contingent: horsContingent,
     ineligible,
-    top4: eligible.slice(0, 4),
+    top4: conforme.slice(0, 4),
     stats: {
-      nb_eligible: eligible.length,
+      nb_conforme_contingent: conforme.length,
+      nb_hors_contingent: horsContingent.length,
+      nb_eligible: conforme.length + horsContingent.length,
       nb_ineligible: ineligible.length,
-      nb_avec_audience: eligible.filter(x =>
+      nb_avec_audience: conforme.filter(x =>
         audiences.some(a => a.dem_id === x.dem.id && a.favorable)
       ).length
     }
@@ -1325,6 +1658,250 @@ app.post('/api/decisions-cal', requireAuth, requireRole('agent', 'directeur'), (
   writeData('decisions_cal.json', decisions)
   addLog(req.user, 'DECISION_CAL', 'Logement ' + logement_ref)
   res.status(201).json(decision)
+})
+
+// ============================================================
+// MODE DECISION CAL DEDIE : 1 logement / 3 boutons explicites
+// Valider l attribution | Refuser avec motif | Mettre en attente
+// Historisation complete + parcours demandeur + audit + notification
+// ============================================================
+
+const MOTIFS_REFUS_CAL = [
+  'Inadequation ressources / loyer',
+  'Composition familiale incompatible',
+  'Logement non adapte au handicap',
+  'Secteur non souhaite',
+  'Candidat a refuse la proposition',
+  'Dossier incomplet en commission',
+  'Candidat deja attributaire',
+  'Logement retire par le bailleur',
+  'Priorite DALO accordee a un autre',
+  'Derogation contingent non justifiee',
+  'Decision reportee',
+  'Autre'
+]
+
+app.get('/api/decision-cal/motifs', requireAuth, (req, res) => {
+  res.json(MOTIFS_REFUS_CAL)
+})
+
+// Historique des decisions pour un logement donne
+app.get('/api/decision-cal/logement/:logement_id', requireAuth, (req, res) => {
+  const decisions = readData('decisions_cal.json')
+  const filtered = decisions.filter(d => d.logement_id === req.params.logement_id)
+  res.json(filtered)
+})
+
+// Nouvelle decision dediee : Valider / Refuser / Mettre en attente
+app.post('/api/decision-cal/:logement_id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+  const { decision, dem_id, motif, commentaire, rang, score } = req.body || {}
+  const logement_id = req.params.logement_id
+
+  if (!['valider', 'refuser', 'attente'].includes(decision)) {
+    return res.status(400).json({ error: 'decision doit etre : valider | refuser | attente' })
+  }
+  if (!dem_id) return res.status(400).json({ error: 'dem_id requis' })
+  if (decision === 'refuser' && !motif) return res.status(400).json({ error: 'motif obligatoire pour un refus' })
+
+  const logements = readData('logements.json')
+  const log = logements.find(l => l.id === logement_id)
+  if (!log) return res.status(404).json({ error: 'Logement introuvable' })
+
+  const demandeurs = readData('demandeurs.json')
+  const demIdx = demandeurs.findIndex(d => d.id === dem_id)
+  if (demIdx < 0) return res.status(404).json({ error: 'Demandeur introuvable' })
+  const dem = demandeurs[demIdx]
+
+  const decisions = readData('decisions_cal.json')
+  const decisionObj = {
+    id: 'CAL' + Date.now(),
+    logement_id,
+    logement_ref: log.ref || '',
+    logement_adresse: log.adresse || '',
+    date_cal: nowDate(),
+    heure_cal: nowTime(),
+    candidats: [{
+      dem_id,
+      nom: dem.nom + ' ' + dem.prenom,
+      nud: dem.nud || '',
+      rang: rang || 1,
+      score: score || 0,
+      decision: decision === 'valider' ? 'Retenu rang 1 - attribution' :
+                decision === 'refuser' ? 'Refuse' : 'Mise en attente',
+      motif: motif || '',
+      commentaire: commentaire || ''
+    }],
+    mode: 'decision_dediee',
+    type_decision: decision,
+    agent_nom: req.user.prenom + ' ' + req.user.nom,
+    agent_role: req.user.role,
+    created_at: new Date().toISOString(),
+    statut: 'validee'
+  }
+
+  // Application des effets metier selon la decision
+  if (decision === 'valider') {
+    // Logement -> attribue
+    const lidx = logements.findIndex(l => l.id === logement_id)
+    if (lidx >= 0) {
+      logements[lidx].statut = 'attribue'
+      writeData('logements.json', logements)
+    }
+    // Demandeur -> attribue + parcours
+    demandeurs[demIdx].statut = 'attribue'
+    if (!Array.isArray(demandeurs[demIdx].parcours)) demandeurs[demIdx].parcours = []
+    demandeurs[demIdx].parcours.push({
+      date: nowDate(),
+      type: 'Attribution CAL',
+      detail: 'Logement ' + log.ref + ' - ' + log.adresse + ' (mode decision dediee)'
+    })
+    writeData('demandeurs.json', demandeurs)
+
+    // Cloturer audience favorable si existe
+    const audiences = readData('audiences.json')
+    const aIdx = audiences.findIndex(a => a.dem_id === dem_id && a.statut !== 'Attribue')
+    if (aIdx >= 0) {
+      audiences[aIdx].statut = 'Attribue'
+      audiences[aIdx].quartier_attribue = log.adresse || log.quartier || ''
+      writeData('audiences.json', audiences)
+    }
+  } else if (decision === 'refuser') {
+    // Parcours demandeur : refus motive
+    if (!Array.isArray(demandeurs[demIdx].parcours)) demandeurs[demIdx].parcours = []
+    demandeurs[demIdx].parcours.push({
+      date: nowDate(),
+      type: 'Refus CAL',
+      detail: (log.ref || '-') + ' - motif : ' + motif + (commentaire ? ' (' + commentaire + ')' : '')
+    })
+    writeData('demandeurs.json', demandeurs)
+  } else if (decision === 'attente') {
+    // Logement reste vacant, demandeur parcours mise en attente
+    if (!Array.isArray(demandeurs[demIdx].parcours)) demandeurs[demIdx].parcours = []
+    demandeurs[demIdx].parcours.push({
+      date: nowDate(),
+      type: 'Mise en attente CAL',
+      detail: (log.ref || '-') + (commentaire ? ' - ' + commentaire : '')
+    })
+    writeData('demandeurs.json', demandeurs)
+  }
+
+  decisions.unshift(decisionObj)
+  writeData('decisions_cal.json', decisions)
+  addLog(req.user, 'DECISION_CAL_DEDIEE', decision.toUpperCase() + ' - ' + log.ref + ' / ' + dem.nom + ' ' + dem.prenom + (motif ? ' - ' + motif : ''))
+  addAudit(req.user, 'logement', logement_id, log.ref || logement_id, 'decision_cal_' + decision,
+    [{ label: 'Decision', avant: '-', apres: decision + (motif ? ' (' + motif + ')' : '') }],
+    'Decision CAL dediee : ' + decision + ' pour ' + dem.nom + ' ' + dem.prenom)
+
+  res.status(201).json({ ok: true, decision: decisionObj })
+})
+
+// ============================================================
+// QUALITE DES DONNEES : detection automatique des anomalies
+// Doublons, dossiers incomplets, incoherences revenu/composition,
+// taux d effort dangereux, logements sans typologie, candidats sans date
+// ============================================================
+
+function normalizeNomForDedup(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[\s\-']/g, '').trim()
+}
+
+app.get('/api/qualite-donnees', requireAuth, (req, res) => {
+  const demandeurs = readData('demandeurs.json')
+  const logements = readData('logements.json')
+  const actifs = demandeurs.filter(d => d.statut === 'active')
+
+  // 1. Doublons candidats : meme nom + prenom + date naissance normalises
+  const sigMap = {}
+  actifs.forEach(d => {
+    const sig = normalizeNomForDedup(d.nom) + '|' + normalizeNomForDedup(d.prenom) + '|' + (d.date_naissance || '').slice(0, 10)
+    if (!sigMap[sig]) sigMap[sig] = []
+    sigMap[sig].push({ id: d.id, nud: d.nud, nom: d.nom, prenom: d.prenom, date_naissance: d.date_naissance })
+  })
+  const doublons = Object.entries(sigMap)
+    .filter(([_, arr]) => arr.length > 1)
+    .map(([sig, arr]) => ({ signature: sig, candidats: arr, nb: arr.length }))
+
+  // 2. Dossiers incomplets : flag pieces = false
+  const incomplets = actifs
+    .filter(d => !d.pieces)
+    .map(d => ({ id: d.id, nud: d.nud, nom: d.nom + ' ' + d.prenom, anciennete_mois: d.anc || 0 }))
+
+  // 3. Incoherences revenu / composition :
+  //    - 5+ personnes avec revenu < 1000 = signal
+  //    - 1 adulte seul avec revenu > 5000 = signal (peu plausible en logement social)
+  //    - revenu = 0 alors que statut actif
+  const incoherences = []
+  actifs.forEach(d => {
+    const np = (parseInt(d.adultes) || 0) + (parseInt(d.enfants) || 0)
+    const rev = parseFloat(d.rev) || 0
+    if (np >= 5 && rev > 0 && rev < 1000) {
+      incoherences.push({ id: d.id, nud: d.nud, nom: d.nom + ' ' + d.prenom, type: 'revenu_tres_faible_famille',
+        detail: np + ' personnes pour ' + rev + ' EUR/mois' })
+    }
+    if (np === 1 && rev > 5000) {
+      incoherences.push({ id: d.id, nud: d.nud, nom: d.nom + ' ' + d.prenom, type: 'revenu_eleve_isole',
+        detail: 'Personne seule declarant ' + rev + ' EUR/mois (plafond logement social ?)' })
+    }
+    if (rev === 0) {
+      incoherences.push({ id: d.id, nud: d.nud, nom: d.nom + ' ' + d.prenom, type: 'revenu_zero',
+        detail: 'Aucun revenu declare' })
+    }
+  })
+
+  // 4. Taux d effort dangereux : simulation sur logement type T2 moyen 500 EUR
+  //    Si ce taux depasse 40% alors le dossier sera quasi systematiquement exclu
+  const tauxEffortDangereux = actifs
+    .filter(d => {
+      const rev = parseFloat(d.rev) || 1
+      const loyerSimu = 500
+      const te = loyerSimu / rev * 100
+      return te > 40
+    })
+    .map(d => {
+      const rev = parseFloat(d.rev) || 1
+      const te = (500 / rev * 100).toFixed(1)
+      return { id: d.id, nud: d.nud, nom: d.nom + ' ' + d.prenom, rev, taux_effort_simu: te }
+    })
+
+  // 5. Logements sans typologie OU typologie hors T1-T6
+  const logementsSansTyp = logements
+    .filter(l => !l.typ || !['T1', 'T2', 'T3', 'T4', 'T5', 'T6'].includes(l.typ))
+    .map(l => ({ id: l.id, ref: l.ref, adresse: l.adresse, typ: l.typ || null }))
+
+  // 6. Candidats sans date de demande
+  const sansDateDemande = actifs
+    .filter(d => !d.date_demande && !d.anc)
+    .map(d => ({ id: d.id, nud: d.nud, nom: d.nom + ' ' + d.prenom }))
+
+  // 7. Logements sans loyer renseigne
+  const logementsSansLoyer = logements
+    .filter(l => (!l.loyer || l.loyer === 0) && (!l.statut || l.statut === 'vacant'))
+    .map(l => ({ id: l.id, ref: l.ref, adresse: l.adresse }))
+
+  // 8. Candidats sans secteur ni quartier souhaite
+  const sansSouhait = actifs
+    .filter(d => (!Array.isArray(d.quartiers) || d.quartiers.length === 0) &&
+                 (!Array.isArray(d.secteurs) || d.secteurs.length === 0))
+    .map(d => ({ id: d.id, nud: d.nud, nom: d.nom + ' ' + d.prenom }))
+
+  const total = doublons.length + incomplets.length + incoherences.length +
+                tauxEffortDangereux.length + logementsSansTyp.length +
+                sansDateDemande.length + logementsSansLoyer.length + sansSouhait.length
+
+  res.json({
+    total_anomalies: total,
+    date_calcul: new Date().toISOString(),
+    categories: {
+      doublons_candidats: { nb: doublons.length, items: doublons.slice(0, 50) },
+      dossiers_incomplets: { nb: incomplets.length, items: incomplets.slice(0, 50) },
+      incoherences_revenu: { nb: incoherences.length, items: incoherences.slice(0, 50) },
+      taux_effort_dangereux: { nb: tauxEffortDangereux.length, items: tauxEffortDangereux.slice(0, 50) },
+      logements_sans_typologie: { nb: logementsSansTyp.length, items: logementsSansTyp.slice(0, 50) },
+      candidats_sans_date: { nb: sansDateDemande.length, items: sansDateDemande.slice(0, 50) },
+      logements_sans_loyer: { nb: logementsSansLoyer.length, items: logementsSansLoyer.slice(0, 50) },
+      candidats_sans_souhait: { nb: sansSouhait.length, items: sansSouhait.slice(0, 50) }
+    }
+  })
 })
 
 // ============================================================
@@ -2379,6 +2956,31 @@ app.post('/api/portail/logout', requirePortailAuth, (req, res) => {
   PORTAIL_SESSIONS.delete(tok)
   res.json({ ok: true })
 })
+
+// --- FranceConnect : montage des routes /api/fc/* ---
+// Utilise les sessions portail existantes : l'auth FC cree le meme type de token
+// qu'une auth NUD+date, donc tout le code /api/portail/* fonctionne sans modif.
+try {
+  mountFranceConnect(app, {
+    readData,
+    createSessionFor: (dem_id) => {
+      const token = randomBytes(24).toString('hex')
+      const demandeurs = readData('demandeurs.json')
+      const dem = demandeurs.find(d => d.id === dem_id)
+      PORTAIL_SESSIONS.set(token, {
+        dem_id,
+        nud: dem ? dem.nud : '',
+        expire_at: Date.now() + PORTAIL_TTL_MS,
+        via: 'franceconnect'
+      })
+      return token
+    },
+    addLog
+  })
+  console.log('[fc] FranceConnect monte (actif: ' + (!!process.env.FC_CLIENT_ID) + ')')
+} catch (e) {
+  console.error('[fc] montage impossible : ' + e.message)
+}
 
 // Dossier complet du candidat authentifie (remplace l ancien dossier public)
 app.get('/api/portail/dossier', requirePortailAuth, (req, res) => {
@@ -3567,6 +4169,187 @@ app.get('/api/courriers/:id/pdf', requireAuth, (req, res) => {
   const dem = demandeurs.find(d => d.id === courrier.dem_id) || {}
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
   res.send(renderCourrierHtml(courrier, dem))
+})
+
+// ============================================================
+// EXPORT COURRIER .docx (Word natif via generate_docx.py)
+// Complementaire du PDF HTML : donne un fichier editable
+// ============================================================
+
+function parseAdresseLines(dem) {
+  const l1 = dem.adresse || ''
+  const l2 = [dem.code_postal, dem.ville].filter(Boolean).join(' ')
+  return { adresse_ligne1: l1, adresse_ligne2: l2 }
+}
+
+function paragraphesFromCorps(corps) {
+  // Split sur lignes vides pour garder les paragraphes
+  return String(corps || '').split(/\n/).map(s => s.trim()).filter(Boolean)
+}
+
+function runDocxGenerator(payload) {
+  return new Promise((resolve, reject) => {
+    const tmpDir = join(__dirname, 'data', 'tmp_docx')
+    try { if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true }) } catch (e) {}
+    const outPath = join(tmpDir, 'doc_' + Date.now() + '_' + Math.floor(Math.random() * 1e6) + '.docx')
+    const scriptPath = join(__dirname, 'generate_docx.py')
+    const child = spawn('python3', [scriptPath, outPath], { stdio: ['pipe', 'pipe', 'pipe'] })
+    let stderr = ''
+    child.stderr.on('data', c => { stderr += String(c) })
+    child.on('error', err => reject(err))
+    child.on('close', code => {
+      if (code !== 0) return reject(new Error('generate_docx.py exit ' + code + ' : ' + stderr))
+      if (!existsSync(outPath)) return reject(new Error('docx non cree'))
+      resolve(outPath)
+    })
+    child.stdin.end(JSON.stringify(payload))
+  })
+}
+
+// DOCX d un courrier deja enregistre
+app.get('/api/courriers/:id/docx', requireAuth, async (req, res) => {
+  try {
+    const all = readData('courriers.json')
+    const courrier = all.find(c => c.id === req.params.id)
+    if (!courrier) return res.status(404).json({ error: 'Courrier introuvable' })
+    const demandeurs = readData('demandeurs.json')
+    const dem = demandeurs.find(d => d.id === courrier.dem_id) || {}
+
+    const adr = parseAdresseLines(dem)
+    const dateFr = new Date(courrier.date_creation || Date.now()).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
+
+    const payload = {
+      titre: courrier.objet,
+      ref: courrier.id,
+      nud: dem.nud || '',
+      date_fr: dateFr,
+      destinataire: {
+        civilite: dem.civilite || '',
+        prenom: dem.prenom || '',
+        nom: dem.nom || '',
+        adresse_ligne1: adr.adresse_ligne1,
+        adresse_ligne2: adr.adresse_ligne2
+      },
+      objet: courrier.objet || '',
+      paragraphes: paragraphesFromCorps(courrier.corps),
+      signature_line: 'Pour le Maire, l Adjoint delegue au Logement'
+    }
+    const outPath = await runDocxGenerator(payload)
+    const filename = 'courrier_' + (courrier.id || 'LOGIVIA') + '.docx'
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"')
+    res.sendFile(outPath, err => {
+      try { unlinkSync(outPath) } catch (e) {}
+      if (err && !res.headersSent) res.status(500).json({ error: err.message })
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// DOCX : fiche candidat (export brut d un dossier demandeur)
+app.get('/api/demandeurs/:id/docx', requireAuth, async (req, res) => {
+  try {
+    const demandeurs = readData('demandeurs.json')
+    const dem = demandeurs.find(d => d.id === req.params.id)
+    if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
+
+    const adr = parseAdresseLines(dem)
+    const parcours = (dem.parcours || []).slice(0, 20)
+      .map(p => '- ' + (p.date || '') + ' : ' + (p.type || '') + (p.detail ? ' - ' + p.detail : ''))
+    const np = (parseInt(dem.adultes) || 0) + (parseInt(dem.enfants) || 0)
+
+    const paragraphes = [
+      'NUD : ' + (dem.nud || '-') + ' / Statut : ' + (dem.statut || '-'),
+      'Anciennete : ' + (dem.anc || 0) + ' mois / Revenu mensuel : ' + (dem.rev || 0) + ' EUR',
+      'Composition : ' + (dem.adultes || 0) + ' adulte(s), ' + (dem.enfants || 0) + ' enfant(s) - total ' + np + ' personnes',
+      'Typologie souhaitee : ' + (dem.typ_v || '-') + ' (min ' + (dem.typ_min || 'T1') + ' / max ' + (dem.typ_max || 'T6') + ')',
+      'Quartiers souhaites : ' + ((dem.quartiers || []).join(', ') || '-'),
+      'Secteurs souhaites : ' + ((dem.secteurs || []).join(', ') || '-'),
+      'Priorites : ' + [
+        dem.dalo ? 'DALO' : null,
+        dem.prio_expulsion ? 'Expulsion' : null,
+        dem.violences ? 'Violences' : null,
+        dem.handicap ? 'Handicap' : null,
+        dem.sans_log ? 'Sans logement' : null,
+        dem.grossesse ? 'Grossesse' : null
+      ].filter(Boolean).join(', ') || '(aucune priorite specifique)',
+      'Dossier complet : ' + (dem.pieces ? 'Oui' : 'Non'),
+      '',
+      'PARCOURS DU DOSSIER',
+      ...(parcours.length ? parcours : ['Aucun evenement enregistre.'])
+    ]
+
+    const payload = {
+      titre: 'Fiche candidat - ' + (dem.nom || '') + ' ' + (dem.prenom || ''),
+      ref: dem.id,
+      nud: dem.nud || '',
+      date_fr: new Date().toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' }),
+      destinataire: {
+        civilite: dem.civilite || '',
+        prenom: dem.prenom || '',
+        nom: dem.nom || '',
+        adresse_ligne1: adr.adresse_ligne1,
+        adresse_ligne2: adr.adresse_ligne2
+      },
+      objet: 'Fiche candidat (document interne CAL)',
+      paragraphes,
+      signature_line: 'Document edite par le Service Habitat'
+    }
+    const outPath = await runDocxGenerator(payload)
+    const filename = 'fiche_' + (dem.nud || dem.id) + '.docx'
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"')
+    res.sendFile(outPath, err => {
+      try { unlinkSync(outPath) } catch (e) {}
+      if (err && !res.headersSent) res.status(500).json({ error: err.message })
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// DOCX : apercu direct (sans enregistrement) - symetrique du /courriers/preview
+app.post('/api/courriers/preview-docx', requireAuth, async (req, res) => {
+  try {
+    const { dem_id, statut, objet, corps, pieces, objet_relance, logement_ref, bailleur } = req.body || {}
+    if (!dem_id || !statut) return res.status(400).json({ error: 'dem_id et statut requis' })
+    if (!COURRIER_STATUTS.includes(statut)) return res.status(400).json({ error: 'statut invalide' })
+    const demandeurs = readData('demandeurs.json')
+    const dem = demandeurs.find(d => d.id === dem_id)
+    if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
+    const tpl = COURRIER_TEMPLATES[statut]
+    const opts = { pieces, objet_relance, logement_ref, bailleur }
+    const corpsFinal = corps || tpl.corps(dem, opts)
+    const objetFinal = objet || tpl.objet
+
+    const adr = parseAdresseLines(dem)
+    const payload = {
+      titre: objetFinal,
+      ref: 'APERCU',
+      nud: dem.nud || '',
+      date_fr: new Date().toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' }),
+      destinataire: {
+        civilite: dem.civilite || '',
+        prenom: dem.prenom || '',
+        nom: dem.nom || '',
+        adresse_ligne1: adr.adresse_ligne1,
+        adresse_ligne2: adr.adresse_ligne2
+      },
+      objet: objetFinal,
+      paragraphes: paragraphesFromCorps(corpsFinal),
+      signature_line: 'Pour le Maire, l Adjoint delegue au Logement'
+    }
+    const outPath = await runDocxGenerator(payload)
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    res.setHeader('Content-Disposition', 'attachment; filename="apercu_' + statut + '.docx"')
+    res.sendFile(outPath, err => {
+      try { unlinkSync(outPath) } catch (e) {}
+      if (err && !res.headersSent) res.status(500).json({ error: err.message })
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
 })
 
 // Apercu imprimable avant creation (pour les 4 boutons : genere le courrier ET affiche le PDF)
@@ -5374,6 +6157,13 @@ setInterval(() => { sauvegardeQuotidienne().catch(() => {}) }, 24 * 60 * 60 * 10
 // ============================================================
 // DEMARRAGE
 // ============================================================
+
+// Bootstrap final : s'assurer que les referentiels critiques sont presents
+try {
+  ensureContingentsConfig()
+} catch (e) {
+  console.error('[bootstrap] ensureContingentsConfig : ' + e.message)
+}
 
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => {

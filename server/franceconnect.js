@@ -30,6 +30,7 @@
  */
 
 import { randomBytes, createHash } from 'crypto'
+import { ephSet, ephGet, ephDelete } from './ephemeral.js'
 
 /* ------------------------------------------------------------------ */
 /* Endpoints officiels FranceConnect                                   */
@@ -51,20 +52,14 @@ const FC_ENDPOINTS = {
 }
 
 /* ------------------------------------------------------------------ */
-/* Etat en memoire : state/nonce attendus + id_token pour logout       */
-/* En prod avec plusieurs instances, mettre ca dans Redis.             */
+/* Etat OAuth : state/nonce attendus + id_token pour logout.           */
+/* Persisté dans Supabase (namespaces 'fc_state' / 'fc_idtoken') plutôt */
+/* qu'en mémoire : la requête /auth et la requête /callback peuvent    */
+/* atterrir sur deux instances serverless différentes.                 */
 /* ------------------------------------------------------------------ */
 
-const pendingStates = new Map() // state -> { nonce, created_at }
-const activeIdTokens = new Map() // portail_token -> id_token (pour RP-logout)
-
-// Nettoyage periodique des state expires (>10 min)
-setInterval(() => {
-  const now = Date.now()
-  for (const [k, v] of pendingStates.entries()) {
-    if (now - v.created_at > 10 * 60 * 1000) pendingStates.delete(k)
-  }
-}, 60 * 1000).unref?.()
+const FC_STATE_TTL = 10 * 60 * 1000
+const FC_IDTOKEN_TTL = 24 * 60 * 60 * 1000
 
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
@@ -147,7 +142,7 @@ export function mountFranceConnect(app, deps) {
   })
 
   // 1. Lancement du flow : redirection vers FranceConnect
-  app.get('/api/fc/auth', (req, res) => {
+  app.get('/api/fc/auth', async (req, res) => {
     const cfg = getConfig()
     if (!cfg.enabled) {
       return res.status(503).json({
@@ -161,7 +156,7 @@ export function mountFranceConnect(app, deps) {
 
     const state = randomBytes(24).toString('hex')
     const nonce = randomBytes(24).toString('hex')
-    pendingStates.set(state, { nonce, created_at: Date.now() })
+    await ephSet('fc_state', state, { nonce }, FC_STATE_TTL)
 
     const url = new URL(cfg.endpoints.authorize)
     url.searchParams.set('response_type', 'code')
@@ -172,7 +167,7 @@ export function mountFranceConnect(app, deps) {
     url.searchParams.set('nonce', nonce)
     url.searchParams.set('acr_values', 'eidas1') // niveau faible suffisant pour demande logement
 
-    if (addLog) try { addLog(null, 'FC_AUTH_INIT', 'state=' + state.slice(0, 8)) } catch {}
+    if (addLog) try { await addLog(null, 'FC_AUTH_INIT', 'state=' + state.slice(0, 8)) } catch {}
     res.redirect(url.toString())
   })
 
@@ -188,11 +183,11 @@ export function mountFranceConnect(app, deps) {
     if (!code || !state) {
       return res.status(400).send('Parametres manquants (code, state)')
     }
-    const pending = pendingStates.get(String(state))
+    const pending = await ephGet('fc_state', String(state))
     if (!pending) {
       return res.status(400).send('State invalide ou expire')
     }
-    pendingStates.delete(String(state))
+    await ephDelete('fc_state', String(state))
 
     try {
       // Echange du code contre un token
@@ -244,22 +239,22 @@ export function mountFranceConnect(app, deps) {
       }
 
       // Lookup demandeur dans Logivia
-      const demandeurs = readData ? readData('demandeurs.json') : []
+      const demandeurs = readData ? await readData('demandeurs.json') : []
       const dem = findDemandeurByIdentity(demandeurs, userinfo)
       if (!dem) {
         // Identite verifiee mais pas de dossier - on redirige vers une page d info
-        if (addLog) try { addLog(null, 'FC_NO_MATCH', userinfo.family_name + ' ' + userinfo.given_name) } catch {}
+        if (addLog) try { await addLog(null, 'FC_NO_MATCH', userinfo.family_name + ' ' + userinfo.given_name) } catch {}
         return res.redirect('/portail?fc_error=no_dossier&nom=' + encodeURIComponent(userinfo.family_name || ''))
       }
 
       // Creation de la session portail
-      const portailToken = createSessionFor ? createSessionFor(dem.id) : null
+      const portailToken = createSessionFor ? await createSessionFor(dem.id) : null
       if (!portailToken) {
         return res.redirect('/portail?fc_error=session_create')
       }
-      activeIdTokens.set(portailToken, tokens.id_token)
+      await ephSet('fc_idtoken', portailToken, { id_token: tokens.id_token }, FC_IDTOKEN_TTL)
 
-      if (addLog) try { addLog(null, 'FC_LOGIN_OK', 'dem: ' + dem.id + ' - ' + dem.nom + ' ' + dem.prenom) } catch {}
+      if (addLog) try { await addLog(null, 'FC_LOGIN_OK', 'dem: ' + dem.id + ' - ' + dem.nom + ' ' + dem.prenom) } catch {}
 
       // Redirection vers le portail avec le token en fragment (pas en query pour eviter logs)
       return res.redirect('/portail?fc_ok=1#token=' + encodeURIComponent(portailToken))
@@ -270,11 +265,12 @@ export function mountFranceConnect(app, deps) {
   })
 
   // 3. Logout RP-initiated (optionnel - deconnecte aussi de FC)
-  app.get('/api/fc/logout', (req, res) => {
+  app.get('/api/fc/logout', async (req, res) => {
     const cfg = getConfig()
     const portailToken = req.query.token || req.headers['x-portail-token']
-    const idToken = portailToken ? activeIdTokens.get(String(portailToken)) : null
-    if (portailToken) activeIdTokens.delete(String(portailToken))
+    const stored = portailToken ? await ephGet('fc_idtoken', String(portailToken)) : null
+    const idToken = stored ? stored.id_token : null
+    if (portailToken) await ephDelete('fc_idtoken', String(portailToken))
 
     if (!cfg.enabled || !idToken) {
       return res.redirect(cfg.logout_redirect || '/portail')

@@ -1,5 +1,55 @@
 [
   {
+    "id": "L1783272662184",
+    "date": "05/07/2026",
+    "heure": "17:31:02",
+    "user_id": "U1",
+    "user_nom": "CAL Administrateur",
+    "role": "directeur",
+    "action": "LOGIN",
+    "detail": "ip: 127.0.0.1"
+  },
+  {
+    "id": "L1783272632311",
+    "date": "05/07/2026",
+    "heure": "17:30:32",
+    "user_id": "U1",
+    "user_nom": "CAL Administrateur",
+    "role": "directeur",
+    "action": "LOGIN",
+    "detail": "ip: 127.0.0.1"
+  },
+  {
+    "id": "L1783272621735",
+    "date": "05/07/2026",
+    "heure": "17:30:21",
+    "user_id": "U1",
+    "user_nom": "CAL Administrateur",
+    "role": "directeur",
+    "action": "LOGIN",
+    "detail": "ip: 127.0.0.1"
+  },
+  {
+    "id": "L1783272621675",
+    "date": "05/07/2026",
+    "heure": "17:30:21",
+    "user_id": "U1",
+    "user_nom": "CAL Administrateur",
+    "role": "directeur",
+    "action": "LOGIN",
+    "detail": "ip: 127.0.0.1"
+  },
+  {
+    "id": "L1777020786470",
+    "date": "24/04/2026",
+    "heure": "10:53:06",
+    "user_id": "system",
+    "user_nom": "Systeme",
+    "role": "system",
+    "action": "RGPD_PURGE",
+    "detail": "{\"date\":\"2026-04-24T08:53:06.422Z\",\"audit_supprimes\":0,\"logs_supprimes\":0,\"demandes_anonymisees\":0,\"rgpd_demandes_supprimees\":0,\"pieces_supprimees\":0,\"comptes_desactives\":0,\"comptes_supprimes\":0}"
+  },
+  {
     "id": "L1776535197568",
     "date": "18/04/2026",
     "heure": "19:59:57",

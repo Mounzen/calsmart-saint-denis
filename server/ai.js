@@ -101,23 +101,23 @@ function detectIntent(q) {
 /* Chargement de contexte (lazy, prudent si SQL down)                 */
 /* ------------------------------------------------------------------ */
 
-function safeRead(readArr, name) {
-  try { return readArr(name) || [] } catch { return [] }
+async function safeRead(readArr, name) {
+  try { return (await readArr(name)) || [] } catch { return [] }
 }
-function safeReadObj(readObj, name) {
-  try { return readObj(name) || {} } catch { return {} }
+async function safeReadObj(readObj, name) {
+  try { return (await readObj(name)) || {} } catch { return {} }
 }
 
-function loadSnapshot(readArr, readObj) {
+async function loadSnapshot(readArr, readObj) {
   return {
-    demandeurs: safeRead(readArr, 'demandeurs'),
-    logements: safeRead(readArr, 'logements'),
-    audiences: safeRead(readArr, 'audiences'),
-    elus: safeRead(readArr, 'elus'),
-    decisions: safeRead(readArr, 'decisions'),
-    notifications: safeRead(readArr, 'notifications'),
-    relances: safeRead(readArr, 'relances'),
-    referentiels: safeReadObj(readObj, 'referentiels')
+    demandeurs: await safeRead(readArr, 'demandeurs'),
+    logements: await safeRead(readArr, 'logements'),
+    audiences: await safeRead(readArr, 'audiences'),
+    elus: await safeRead(readArr, 'elus'),
+    decisions: await safeRead(readArr, 'decisions'),
+    notifications: await safeRead(readArr, 'notifications'),
+    relances: await safeRead(readArr, 'relances'),
+    referentiels: await safeReadObj(readObj, 'referentiels')
   }
 }
 
@@ -463,9 +463,9 @@ function replyHowTo(q) {
 /* Router principal                                                    */
 /* ------------------------------------------------------------------ */
 
-export function answerQuery(query, ctx) {
+export async function answerQuery(query, ctx) {
   const { user, readArr, readObj } = ctx
-  const snap = loadSnapshot(readArr, readObj)
+  const snap = await loadSnapshot(readArr, readObj)
   const intent = detectIntent(query)
 
   switch (intent) {
@@ -508,7 +508,7 @@ export function answerQuery(query, ctx) {
 export async function answerWithLLM(query, ctx) {
   if (!process.env.ANTHROPIC_API_KEY) return null
   try {
-    const snap = loadSnapshot(ctx.readArr, ctx.readObj)
+    const snap = await loadSnapshot(ctx.readArr, ctx.readObj)
     const context = {
       nb_demandeurs: snap.demandeurs.length,
       nb_logements: snap.logements.length,

@@ -135,7 +135,10 @@
     "Action Logement",
     "Bailleur",
     "Département",
-    "Région"
+    "Région",
+    "Prefecture",
+    "Departement",
+    "Region"
   ],
   "situations_logement": [
     "locataire social",
@@ -219,5 +222,82 @@
       "nb_refus_non_motives": 0,
       "derniere_proposition_mois": 4
     }
-  }
+  },
+  "contingents_config": [
+    {
+      "nom": "Prefecture",
+      "quota_pct": 25,
+      "description": "Contingent prefectoral - 25% reserve aux menages prioritaires DALO et sortants de structures (CCH L.441-1)",
+      "eligibilite": [
+        "dalo",
+        "prio_expulsion",
+        "sans_log",
+        "violences",
+        "sortie_hebergement"
+      ],
+      "priorite": 1,
+      "couleur": "#b71c1c",
+      "obligatoire": true
+    },
+    {
+      "nom": "Action Logement",
+      "quota_pct": 25,
+      "description": "1% patronal - reserve aux salaries d entreprises cotisantes (>10 salaries, secteur prive)",
+      "eligibilite": [
+        "salarie_cotisant",
+        "mutation_professionnelle",
+        "jeune_actif"
+      ],
+      "priorite": 2,
+      "couleur": "#1565c0",
+      "obligatoire": false
+    },
+    {
+      "nom": "Ville",
+      "quota_pct": 20,
+      "description": "Contingent communal - habitants de la commune, agents, priorites municipales",
+      "eligibilite": [
+        "habitant_commune",
+        "agent_ville",
+        "attache_territoire"
+      ],
+      "priorite": 3,
+      "couleur": "#6a1b9a",
+      "obligatoire": false
+    },
+    {
+      "nom": "Bailleur",
+      "quota_pct": 30,
+      "description": "Part reservee au bailleur - candidats libres, mutations internes, gestion du parc",
+      "eligibilite": [],
+      "priorite": 4,
+      "couleur": "#2e7d32",
+      "obligatoire": false
+    },
+    {
+      "nom": "Departement",
+      "quota_pct": 0,
+      "description": "Contingent departemental (optionnel) - publics sociaux accompagnes",
+      "eligibilite": [
+        "rsa",
+        "accompagnement_social"
+      ],
+      "priorite": 5,
+      "couleur": "#ef6c00",
+      "obligatoire": false
+    },
+    {
+      "nom": "Region",
+      "quota_pct": 0,
+      "description": "Contingent regional (optionnel) - jeunes, apprentis, etudiants boursiers",
+      "eligibilite": [
+        "jeune_actif",
+        "apprenti",
+        "etudiant_boursier"
+      ],
+      "priorite": 6,
+      "couleur": "#00838f",
+      "obligatoire": false
+    }
+  ]
 }

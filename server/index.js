@@ -51,8 +51,23 @@ import {
 } from './db.js'
 import { answerQuery as aiAnswer, answerWithLLM as aiLlm } from './ai.js'
 import { mountFranceConnect } from './franceconnect.js'
+import { ephSet, ephGet, ephDelete, ephCleanup } from './ephemeral.js'
+import { uploadPiece, downloadPiece, deletePiece } from './storage.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+
+// Filet de sécurité : Express 4 ne rattrape PAS automatiquement une
+// promesse rejetée dans un handler async (contrairement à Express 5).
+// Avec ~100 routes désormais async (migration Supabase), une erreur
+// oubliée dans un try/catch ferait planter tout le process Node sans ce
+// filet. On journalise et on continue plutôt que de faire tomber le
+// service pour tout le monde à cause d'une seule requête en erreur.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason && reason.stack ? reason.stack : reason)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err && err.stack ? err.stack : err)
+})
 
 // DATA_DIR : sur Railway, on monte un Volume sur /data ; en local, fallback ./server/data
 const SEED_DATA = join(__dirname, 'data')
@@ -90,23 +105,21 @@ if (DATA !== SEED_DATA && existsSync(SEED_DATA)) {
   }
 }
 
-// Ouverture de la base SQLite (migration auto des JSON si base neuve)
-// openDatabase est async depuis v3.2 : import dynamique de better-sqlite3
-// pour encaisser un environnement ou le module natif n'est pas installe
-// (ex: Railway qui a rate le postinstall) -> on bascule proprement sur JSON.
+// Ouverture de la connexion Supabase (import auto des JSON de graine si la
+// table logivia_kv est vide — utile au tout premier déploiement).
 let SQLITE_READY = false
 try {
   await openDatabase(DATA)
-  const s = dbStats()
-  if (s) console.log('[db] SQLite prete : ' + s.file_count + ' entree(s), ' + Math.round(s.size_bytes / 1024) + ' ko')
+  const s = await dbStats()
+  if (s) console.log('[db] Supabase prete : ' + s.file_count + ' entree(s), ' + Math.round(s.size_bytes / 1024) + ' ko')
   SQLITE_READY = true
 } catch (e) {
-  console.error('[db] ouverture impossible : ' + e.message)
-  console.error('[db] le serveur fonctionnera en mode degrade (lecture/ecriture JSON fallback)')
-  console.error('[db] pour activer SQLite : "npm install better-sqlite3" puis redeployer')
+  console.error('[db] connexion Supabase impossible : ' + e.message)
+  console.error('[db] le serveur fonctionnera en mode degrade (lecture/ecriture JSON fallback local)')
+  console.error('[db] verifiez SUPABASE_URL et SUPABASE_SERVICE_ROLE_KEY')
 }
 
-// Fermeture propre de la base au shutdown
+// Rien à fermer explicitement avec Supabase (client HTTP), conservé pour compat.
 process.on('SIGTERM', () => { try { dbClose() } catch (_) {} })
 process.on('SIGINT', () => { try { dbClose() } catch (_) {}; process.exit(0) })
 
@@ -117,11 +130,14 @@ process.on('SIGINT', () => { try { dbClose() } catch (_) {}; process.exit(0) })
 // Depuis la v3.1, readData / readObj / writeData delegent a la base SQLite.
 // L'API reste identique : les 280 appels existants continuent de fonctionner sans modification.
 // En cas d'echec SQLite (ex : module natif non compile), fallback automatique sur les fichiers .json.
-function readData(file) {
+// Depuis la migration Supabase, ces trois helpers sont asynchrones (appel
+// HTTP Postgrest). Fallback JSON local conservé uniquement pour le mode dev
+// hors-ligne (si SUPABASE_URL n'est pas défini).
+async function readData(file) {
   try {
-    return dbReadData(file)
+    return await dbReadData(file)
   } catch (e) {
-    console.error('[readData/SQL] ' + file + ': ' + e.message + ' — fallback JSON')
+    console.error('[readData/Supabase] ' + file + ': ' + e.message + ' — fallback JSON local')
     const path = join(DATA, file)
     try {
       if (!existsSync(path)) return []
@@ -136,11 +152,11 @@ function readData(file) {
   }
 }
 
-function readObj(file, fallback) {
+async function readObj(file, fallback) {
   try {
-    return dbReadObj(file, fallback)
+    return await dbReadObj(file, fallback)
   } catch (e) {
-    console.error('[readObj/SQL] ' + file + ': ' + e.message + ' — fallback JSON')
+    console.error('[readObj/Supabase] ' + file + ': ' + e.message + ' — fallback JSON local')
     const path = join(DATA, file)
     try {
       if (!existsSync(path)) return fallback || {}
@@ -155,13 +171,13 @@ function readObj(file, fallback) {
   }
 }
 
-function writeData(file, data) {
+async function writeData(file, data) {
   try {
-    const ok = dbWriteData(file, data)
+    const ok = await dbWriteData(file, data)
     if (ok) return true
     throw new Error('dbWriteData returned false')
   } catch (e) {
-    console.error('[writeData/SQL] ' + file + ': ' + e.message + ' — fallback JSON')
+    console.error('[writeData/Supabase] ' + file + ': ' + e.message + ' — fallback JSON local')
     try {
       writeFileSync(join(DATA, file), JSON.stringify(data, null, 2), 'utf8')
       return true
@@ -192,12 +208,14 @@ function nowTime() {
 // SESSIONS
 // ============================================================
 
-const SESSIONS = new Map()
+// Sessions persistées dans Supabase (logivia_ephemeral, namespace 'session')
+// au lieu d'une Map() en mémoire : indispensable en serverless, où deux
+// requêtes successives peuvent atterrir sur des instances différentes.
 const SESSION_TTL = 8 * 60 * 60 * 1000
 
-function createSession(user) {
+async function createSession(user) {
   const token = randomBytes(32).toString('hex')
-  SESSIONS.set(token, {
+  await ephSet('session', token, {
     user: {
       id: user.id,
       login: user.login,
@@ -206,34 +224,23 @@ function createSession(user) {
       role: user.role,
       elu_id: user.elu_id || null,
       secteur: user.secteur || null
-    },
-    expires: Date.now() + SESSION_TTL
-  })
+    }
+  }, SESSION_TTL)
   return token
 }
 
-function getSession(token) {
+async function getSession(token) {
   if (!token || typeof token !== 'string') return null
-  const s = SESSIONS.get(token)
-  if (!s) return null
-  if (Date.now() > s.expires) { SESSIONS.delete(token); return null }
-  return s
+  return await ephGet('session', token)
 }
-
-setInterval(() => {
-  const now = Date.now()
-  for (const [k, s] of SESSIONS.entries()) {
-    if (now > s.expires) SESSIONS.delete(k)
-  }
-}, 60 * 60 * 1000)
 
 // ============================================================
 // LOGS
 // ============================================================
 
-function addLog(user, action, detail) {
+async function addLog(user, action, detail) {
   try {
-    const logs = readData('logs.json')
+    const logs = await readData('logs.json')
     logs.unshift({
       id: 'L' + Date.now(),
       date: nowDate(),
@@ -244,7 +251,7 @@ function addLog(user, action, detail) {
       action: action || '',
       detail: detail || ''
     })
-    writeData('logs.json', logs.slice(0, 500))
+    await writeData('logs.json', logs.slice(0, 500))
   } catch (e) {
     console.error('[addLog]', e.message)
   }
@@ -296,9 +303,9 @@ function diff(before, after, ignore) {
   return changes
 }
 
-function addAudit(user, entity_type, entity_id, entity_label, action, changes, motif) {
+async function addAudit(user, entity_type, entity_id, entity_label, action, changes, motif) {
   try {
-    const audit = readData('audit.json')
+    const audit = await readData('audit.json')
     audit.unshift({
       id: 'AU' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
       date: nowDate(),
@@ -314,7 +321,7 @@ function addAudit(user, entity_type, entity_id, entity_label, action, changes, m
       changes: Array.isArray(changes) ? changes : [],
       motif: motif || ''
     })
-    writeData('audit.json', audit.slice(0, 5000))
+    await writeData('audit.json', audit.slice(0, 5000))
   } catch (e) {
     console.error('[addAudit]', e.message)
   }
@@ -343,7 +350,7 @@ function checkLoginLimit(ip) {
 const app = express()
 
 // Security headers (helmet-like, zero dep)
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('X-Frame-Options', 'SAMEORIGIN')
   res.setHeader('X-XSS-Protection', '0')
@@ -424,16 +431,21 @@ if (existsSync(join(DIST, 'index.html'))) {
 // MIDDLEWARES AUTH
 // ============================================================
 
-function requireAuth(req, res, next) {
-  const token = req.headers['x-auth-token']
-  const s = getSession(token)
-  if (!s) return res.status(401).json({ error: 'Session expiree. Reconnectez-vous.' })
-  req.user = s.user
-  next()
+async function requireAuth(req, res, next) {
+  try {
+    const token = req.headers['x-auth-token']
+    const s = await getSession(token)
+    if (!s) return res.status(401).json({ error: 'Session expiree. Reconnectez-vous.' })
+    req.user = s.user
+    next()
+  } catch (e) {
+    console.error('[requireAuth]', e.message)
+    res.status(500).json({ error: 'Erreur serveur (session)' })
+  }
 }
 
 function requireRole(...roles) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: 'Non authentifie' })
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({ error: 'Acces refuse' })
@@ -446,7 +458,7 @@ function requireRole(...roles) {
 // PING - healthcheck
 // ============================================================
 
-app.get('/api/ping', (req, res) => {
+app.get('/api/ping', async (req, res) => {
   res.json({
     ok: true,
     version: '3.1',
@@ -461,7 +473,7 @@ app.get('/api/ping', (req, res) => {
 // AUTH
 // ============================================================
 
-app.post('/api/auth/login', rlLoginTight, (req, res) => {
+app.post('/api/auth/login', rlLoginTight, async (req, res) => {
   const ip = req.ip || 'unknown'
   if (!checkLoginLimit(ip)) {
     return res.status(429).json({ error: 'Trop de tentatives. Attendez 15 minutes.' })
@@ -472,7 +484,7 @@ app.post('/api/auth/login', rlLoginTight, (req, res) => {
     return res.status(400).json({ error: 'Login et mot de passe requis' })
   }
 
-  const users = readData('users.json')
+  const users = await readData('users.json')
   const user = users.find(u =>
     u.login === login.trim() &&
     u.password === password &&
@@ -480,12 +492,12 @@ app.post('/api/auth/login', rlLoginTight, (req, res) => {
   )
 
   if (!user) {
-    addLog(null, 'LOGIN_ECHEC', 'login: ' + login + ' ip: ' + ip)
+    await addLog(null, 'LOGIN_ECHEC', 'login: ' + login + ' ip: ' + ip)
     return res.status(401).json({ error: 'Identifiants incorrects' })
   }
 
-  const token = createSession(user)
-  addLog(user, 'LOGIN', 'ip: ' + ip)
+  const token = await createSession(user)
+  await addLog(user, 'LOGIN', 'ip: ' + ip)
 
   res.json({
     token,
@@ -501,27 +513,27 @@ app.post('/api/auth/login', rlLoginTight, (req, res) => {
   })
 })
 
-app.get('/api/auth/me', requireAuth, (req, res) => {
+app.get('/api/auth/me', requireAuth, async (req, res) => {
   res.json({ user: req.user })
 })
 
-app.post('/api/auth/logout', requireAuth, (req, res) => {
-  SESSIONS.delete(req.headers['x-auth-token'])
+app.post('/api/auth/logout', requireAuth, async (req, res) => {
+  await ephDelete('session', req.headers['x-auth-token'])
   res.json({ ok: true })
 })
 
-app.post('/api/auth/change-password', requireAuth, (req, res) => {
+app.post('/api/auth/change-password', requireAuth, async (req, res) => {
   const { ancien, nouveau } = req.body || {}
   if (!ancien || !nouveau) return res.status(400).json({ error: 'Champs manquants' })
 
-  const users = readData('users.json')
+  const users = await readData('users.json')
   const idx = users.findIndex(u => u.id === req.user.id)
   if (idx === -1) return res.status(404).json({ error: 'Utilisateur introuvable' })
   if (users[idx].password !== ancien) return res.status(400).json({ error: 'Ancien mot de passe incorrect' })
 
   users[idx].password = nouveau
-  writeData('users.json', users)
-  addLog(req.user, 'CHANGE_PASSWORD', '')
+  await writeData('users.json', users)
+  await addLog(req.user, 'CHANGE_PASSWORD', '')
   res.json({ ok: true })
 })
 
@@ -529,13 +541,13 @@ app.post('/api/auth/change-password', requireAuth, (req, res) => {
 // UTILISATEURS
 // ============================================================
 
-app.get('/api/users', requireAuth, requireRole('directeur'), (req, res) => {
-  const users = readData('users.json')
+app.get('/api/users', requireAuth, requireRole('directeur'), async (req, res) => {
+  const users = await readData('users.json')
   res.json(users.map(u => ({ ...u, password: '***' })))
 })
 
-app.post('/api/users', requireAuth, requireRole('directeur'), (req, res) => {
-  const users = readData('users.json')
+app.post('/api/users', requireAuth, requireRole('directeur'), async (req, res) => {
+  const users = await readData('users.json')
   const u = {
     id: nextId(users, 'U'),
     login: req.body.login,
@@ -548,19 +560,19 @@ app.post('/api/users', requireAuth, requireRole('directeur'), (req, res) => {
     actif: true
   }
   users.push(u)
-  writeData('users.json', users)
-  addLog(req.user, 'CREATE_USER', u.login)
+  await writeData('users.json', users)
+  await addLog(req.user, 'CREATE_USER', u.login)
   res.status(201).json({ ...u, password: '***' })
 })
 
-app.put('/api/users/:id', requireAuth, requireRole('directeur'), (req, res) => {
-  const users = readData('users.json')
+app.put('/api/users/:id', requireAuth, requireRole('directeur'), async (req, res) => {
+  const users = await readData('users.json')
   const idx = users.findIndex(u => u.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
   const keep = { id: users[idx].id, password: users[idx].password }
   users[idx] = { ...users[idx], ...req.body, ...keep }
-  writeData('users.json', users)
-  addLog(req.user, 'UPDATE_USER', users[idx].login)
+  await writeData('users.json', users)
+  await addLog(req.user, 'UPDATE_USER', users[idx].login)
   res.json({ ...users[idx], password: '***' })
 })
 
@@ -568,8 +580,8 @@ app.put('/api/users/:id', requireAuth, requireRole('directeur'), (req, res) => {
 // REFERENTIELS + ELUS
 // ============================================================
 
-app.get('/api/referentiels', requireAuth, (req, res) => {
-  const ref = readObj('referentiels.json', {})
+app.get('/api/referentiels', requireAuth, async (req, res) => {
+  const ref = await readObj('referentiels.json', {})
   res.json(ref)
 })
 
@@ -580,48 +592,48 @@ app.get('/api/referentiels', requireAuth, (req, res) => {
 
 const REF_LISTS = ['secteurs', 'quartiers', 'bailleurs', 'contingents', 'situations_logement', 'motifs_refus', 'statuts_post_cal', 'typologies']
 
-app.post('/api/referentiels/:list', requireAuth, requireRole('directeur'), (req, res) => {
+app.post('/api/referentiels/:list', requireAuth, requireRole('directeur'), async (req, res) => {
   const list = req.params.list
   if (!REF_LISTS.includes(list)) return res.status(400).json({ error: 'Liste invalide' })
   const value = (req.body && typeof req.body.value === 'string') ? req.body.value.trim() : ''
   if (!value) return res.status(400).json({ error: 'Valeur vide' })
-  const ref = readObj('referentiels.json', {})
+  const ref = await readObj('referentiels.json', {})
   if (!Array.isArray(ref[list])) ref[list] = []
   if (ref[list].includes(value)) return res.status(409).json({ error: 'Deja present' })
   ref[list].push(value)
-  writeData('referentiels.json', ref)
-  addLog(req.user, 'REF_ADD', list + ':' + value)
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'REF_ADD', list + ':' + value)
   res.status(201).json({ ok: true, list, value, items: ref[list] })
 })
 
-app.delete('/api/referentiels/:list/:value', requireAuth, requireRole('directeur'), (req, res) => {
+app.delete('/api/referentiels/:list/:value', requireAuth, requireRole('directeur'), async (req, res) => {
   const list = req.params.list
   if (!REF_LISTS.includes(list)) return res.status(400).json({ error: 'Liste invalide' })
   const value = decodeURIComponent(req.params.value)
-  const ref = readObj('referentiels.json', {})
+  const ref = await readObj('referentiels.json', {})
   if (!Array.isArray(ref[list])) return res.status(404).json({ error: 'Liste absente' })
   const before = ref[list].length
   ref[list] = ref[list].filter(v => v !== value)
   if (ref[list].length === before) return res.status(404).json({ error: 'Valeur non trouvee' })
-  writeData('referentiels.json', ref)
-  addLog(req.user, 'REF_DEL', list + ':' + value)
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'REF_DEL', list + ':' + value)
   res.json({ ok: true, list, value, items: ref[list] })
 })
 
-app.put('/api/referentiels/:list/:value', requireAuth, requireRole('directeur'), (req, res) => {
+app.put('/api/referentiels/:list/:value', requireAuth, requireRole('directeur'), async (req, res) => {
   const list = req.params.list
   if (!REF_LISTS.includes(list)) return res.status(400).json({ error: 'Liste invalide' })
   const oldValue = decodeURIComponent(req.params.value)
   const newValue = (req.body && typeof req.body.value === 'string') ? req.body.value.trim() : ''
   if (!newValue) return res.status(400).json({ error: 'Nouvelle valeur vide' })
-  const ref = readObj('referentiels.json', {})
+  const ref = await readObj('referentiels.json', {})
   if (!Array.isArray(ref[list])) return res.status(404).json({ error: 'Liste absente' })
   const idx = ref[list].indexOf(oldValue)
   if (idx === -1) return res.status(404).json({ error: 'Valeur non trouvee' })
   if (ref[list].includes(newValue) && newValue !== oldValue) return res.status(409).json({ error: 'Nouvelle valeur deja presente' })
   ref[list][idx] = newValue
-  writeData('referentiels.json', ref)
-  addLog(req.user, 'REF_UPD', list + ':' + oldValue + ' -> ' + newValue)
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'REF_UPD', list + ':' + oldValue + ' -> ' + newValue)
   res.json({ ok: true, list, oldValue, newValue, items: ref[list] })
 })
 
@@ -712,8 +724,8 @@ const CONTINGENTS_CONFIG_974 = [
  * Appelee au demarrage (bootstrapReferentiels) + via sync.
  * Ne touche PAS aux modifications faites par l'admin (merge prudent).
  */
-function ensureContingentsConfig() {
-  const ref = readObj('referentiels.json', {})
+async function ensureContingentsConfig() {
+  const ref = await readObj('referentiels.json', {})
   let changed = false
   if (!Array.isArray(ref.contingents_config)) {
     ref.contingents_config = []
@@ -735,7 +747,7 @@ function ensureContingentsConfig() {
       changed = true
     }
   }
-  if (changed) writeData('referentiels.json', ref)
+  if (changed) await writeData('referentiels.json', ref)
   return ref.contingents_config
 }
 
@@ -787,9 +799,9 @@ function computeContingentsEligibles(dem, configs) {
   return eligibles
 }
 
-app.post('/api/admin/sync-referentiels', requireAuth, requireRole('directeur'), (req, res) => {
+app.post('/api/admin/sync-referentiels', requireAuth, requireRole('directeur'), async (req, res) => {
   const mode = (req.body && req.body.mode) || 'merge'
-  const ref = readObj('referentiels.json', {})
+  const ref = await readObj('referentiels.json', {})
   const before = JSON.stringify(ref)
 
   if (mode === 'replace') {
@@ -818,8 +830,8 @@ app.post('/api/admin/sync-referentiels', requireAuth, requireRole('directeur'), 
   }
 
   const changed = JSON.stringify(ref) !== before
-  if (changed) writeData('referentiels.json', ref)
-  addLog(req.user, 'SYNC_REF_974', mode + (changed ? ' (updated)' : ' (noop)'))
+  if (changed) await writeData('referentiels.json', ref)
+  await addLog(req.user, 'SYNC_REF_974', mode + (changed ? ' (updated)' : ' (noop)'))
   res.json({ ok: true, mode, changed, referentiels: ref })
 })
 
@@ -828,15 +840,15 @@ app.post('/api/admin/sync-referentiels', requireAuth, requireRole('directeur'), 
 // ============================================================
 
 // Lecture de la config (accessible a tous les connectes pour affichage)
-app.get('/api/contingents/config', requireAuth, (req, res) => {
-  const configs = ensureContingentsConfig()
+app.get('/api/contingents/config', requireAuth, async (req, res) => {
+  const configs = await ensureContingentsConfig()
   res.json(configs)
 })
 
 // Mise a jour d'un contingent (directeur uniquement)
-app.put('/api/contingents/config/:nom', requireAuth, requireRole('directeur'), (req, res) => {
+app.put('/api/contingents/config/:nom', requireAuth, requireRole('directeur'), async (req, res) => {
   const nom = decodeURIComponent(req.params.nom)
-  const ref = readObj('referentiels.json', {})
+  const ref = await readObj('referentiels.json', {})
   if (!Array.isArray(ref.contingents_config)) ref.contingents_config = []
   const idx = ref.contingents_config.findIndex(c => c.nom === nom)
   if (idx === -1) return res.status(404).json({ error: 'Contingent non trouve' })
@@ -849,20 +861,20 @@ app.put('/api/contingents/config/:nom', requireAuth, requireRole('directeur'), (
     if (patch[k] !== undefined) ref.contingents_config[idx][k] = patch[k]
   }
   const changes = diff(before, ref.contingents_config[idx])
-  writeData('referentiels.json', ref)
-  addLog(req.user, 'UPDATE_CONTINGENT', nom + (__motif ? ' - ' + __motif : ''))
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'UPDATE_CONTINGENT', nom + (__motif ? ' - ' + __motif : ''))
   if (changes.length > 0) {
-    addAudit(req.user, 'contingent', nom, nom, 'modification', changes, __motif || '')
+    await addAudit(req.user, 'contingent', nom, nom, 'modification', changes, __motif || '')
   }
   res.json(ref.contingents_config[idx])
 })
 
 // Contingents eligibles pour un demandeur donne
-app.get('/api/demandeurs/:id/contingents', requireAuth, (req, res) => {
-  const d = readData('demandeurs.json')
+app.get('/api/demandeurs/:id/contingents', requireAuth, async (req, res) => {
+  const d = await readData('demandeurs.json')
   const dem = d.find(x => x.id === req.params.id)
   if (!dem) return res.status(404).json({ error: 'Demandeur non trouve' })
-  const configs = ensureContingentsConfig()
+  const configs = await ensureContingentsConfig()
   const eligibles = computeContingentsEligibles(dem, configs)
   res.json({
     demandeur_id: dem.id,
@@ -873,10 +885,10 @@ app.get('/api/demandeurs/:id/contingents', requireAuth, (req, res) => {
 })
 
 // Bilan global : consommation par contingent sur une periode
-app.get('/api/contingents/bilan', requireAuth, (req, res) => {
-  const configs = ensureContingentsConfig()
-  const decisions = readData('decisions_cal.json')
-  const logements = readData('logements.json')
+app.get('/api/contingents/bilan', requireAuth, async (req, res) => {
+  const configs = await ensureContingentsConfig()
+  const decisions = await readData('decisions_cal.json')
+  const logements = await readData('logements.json')
   const annee = parseInt(req.query.annee) || new Date().getFullYear()
 
   // Filtre decisions de l'annee avec une attribution (rang 1 retenu)
@@ -927,13 +939,13 @@ app.get('/api/contingents/bilan', requireAuth, (req, res) => {
   })
 })
 
-app.get('/api/elus', requireAuth, (req, res) => {
-  const ref = readObj('referentiels.json', { elus: [] })
+app.get('/api/elus', requireAuth, async (req, res) => {
+  const ref = await readObj('referentiels.json', { elus: [] })
   res.json(ref.elus || [])
 })
 
-app.post('/api/elus', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
-  const ref = readObj('referentiels.json', { elus: [] })
+app.post('/api/elus', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
+  const ref = await readObj('referentiels.json', { elus: [] })
   if (!ref.elus) ref.elus = []
   const elu = {
     id: 'E' + Date.now(),
@@ -946,13 +958,13 @@ app.post('/api/elus', requireAuth, requireRole('directeur', 'agent'), (req, res)
     actif: true
   }
   ref.elus.push(elu)
-  writeData('referentiels.json', ref)
-  addLog(req.user, 'CREATE_ELU', elu.nom)
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'CREATE_ELU', elu.nom)
   res.status(201).json(elu)
 })
 
-app.put('/api/elus/:id', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
-  const ref = readObj('referentiels.json', { elus: [] })
+app.put('/api/elus/:id', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
+  const ref = await readObj('referentiels.json', { elus: [] })
   if (!ref.elus) ref.elus = []
   const idx = ref.elus.findIndex(e => e.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
@@ -963,10 +975,10 @@ app.put('/api/elus/:id', requireAuth, requireRole('directeur', 'agent'), (req, r
   const changes = diff(before, after)
 
   ref.elus[idx] = after
-  writeData('referentiels.json', ref)
-  addLog(req.user, 'UPDATE_ELU', ref.elus[idx].nom + (__motif ? ' - ' + __motif : ''))
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'UPDATE_ELU', ref.elus[idx].nom + (__motif ? ' - ' + __motif : ''))
   if (changes.length > 0) {
-    addAudit(req.user, 'elu', ref.elus[idx].id, ref.elus[idx].nom, 'modification', changes, __motif || '')
+    await addAudit(req.user, 'elu', ref.elus[idx].id, ref.elus[idx].nom, 'modification', changes, __motif || '')
   }
   res.json(ref.elus[idx])
 })
@@ -975,14 +987,14 @@ app.put('/api/elus/:id', requireAuth, requireRole('directeur', 'agent'), (req, r
 // VUE ENRICHIE ELU : audiences + parcours candidats
 // ============================================================
 
-app.get('/api/elus/:id/full', requireAuth, (req, res) => {
-  const ref = readObj('referentiels.json', { elus: [] })
+app.get('/api/elus/:id/full', requireAuth, async (req, res) => {
+  const ref = await readObj('referentiels.json', { elus: [] })
   const elu = (ref.elus || []).find(e => e.id === req.params.id)
   if (!elu) return res.status(404).json({ error: 'Elu non trouve' })
 
-  const audiences = readData('audiences.json').filter(a => a.elu_id === elu.id)
-  const demandeurs = readData('demandeurs.json')
-  const decisions = readData('decisions_cal.json')
+  const audiences = (await readData('audiences.json')).filter(a => a.elu_id === elu.id)
+  const demandeurs = await readData('demandeurs.json')
+  const decisions = await readData('decisions_cal.json')
 
   // Pour chaque audience : statut actuel du candidat
   const details = audiences.map(a => {
@@ -1030,15 +1042,15 @@ app.get('/api/elus/:id/full', requireAuth, (req, res) => {
   })
 })
 
-app.delete('/api/elus/:id', requireAuth, requireRole('directeur'), (req, res) => {
-  const ref = readObj('referentiels.json', { elus: [] })
+app.delete('/api/elus/:id', requireAuth, requireRole('directeur'), async (req, res) => {
+  const ref = await readObj('referentiels.json', { elus: [] })
   if (!ref.elus) ref.elus = []
   const idx = ref.elus.findIndex(e => e.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
   // Archive plutot que suppression
   ref.elus[idx].actif = false
-  writeData('referentiels.json', ref)
-  addLog(req.user, 'ARCHIVE_ELU', ref.elus[idx].nom)
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'ARCHIVE_ELU', ref.elus[idx].nom)
   res.json({ ok: true })
 })
 
@@ -1046,11 +1058,11 @@ app.delete('/api/elus/:id', requireAuth, requireRole('directeur'), (req, res) =>
 // DASHBOARD
 // ============================================================
 
-app.get('/api/dashboard', requireAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const logements = readData('logements.json')
-  const audiences = readData('audiences.json')
-  const notifications = readData('notifications.json')
+app.get('/api/dashboard', requireAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
+  const logements = await readData('logements.json')
+  const audiences = await readData('audiences.json')
+  const notifications = await readData('notifications.json')
 
   const actifs = demandeurs.filter(d => d.statut === 'active')
   const vacants = logements.filter(l => !l.statut || l.statut === 'vacant')
@@ -1126,8 +1138,8 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
 // Statuts : active | attribue | archive | annule
 // ============================================================
 
-app.get('/api/demandeurs', requireAuth, (req, res) => {
-  let d = readData('demandeurs.json')
+app.get('/api/demandeurs', requireAuth, async (req, res) => {
+  let d = await readData('demandeurs.json')
   const { statut, search } = req.query
   if (statut) d = d.filter(x => x.statut === statut)
   else d = d.filter(x => !x.statut || x.statut !== 'archive')
@@ -1138,15 +1150,15 @@ app.get('/api/demandeurs', requireAuth, (req, res) => {
   res.json(d)
 })
 
-app.get('/api/demandeurs/:id', requireAuth, (req, res) => {
-  const d = readData('demandeurs.json')
+app.get('/api/demandeurs/:id', requireAuth, async (req, res) => {
+  const d = await readData('demandeurs.json')
   const item = d.find(x => x.id === req.params.id)
   if (!item) return res.status(404).json({ error: 'Non trouve' })
   res.json(item)
 })
 
-app.post('/api/demandeurs', requireAuth, (req, res) => {
-  const d = readData('demandeurs.json')
+app.post('/api/demandeurs', requireAuth, async (req, res) => {
+  const d = await readData('demandeurs.json')
   const item = {
     id: nextId(d, 'D'),
     nud: req.body.nud || '',
@@ -1182,13 +1194,13 @@ app.post('/api/demandeurs', requireAuth, (req, res) => {
     parcours: [{ date: nowDate(), type: 'Demande creee', detail: 'Saisie manuelle' }]
   }
   d.push(item)
-  writeData('demandeurs.json', d)
-  addLog(req.user, 'CREATE_DEMANDEUR', item.nom + ' ' + item.prenom)
+  await writeData('demandeurs.json', d)
+  await addLog(req.user, 'CREATE_DEMANDEUR', item.nom + ' ' + item.prenom)
   res.status(201).json(item)
 })
 
-app.put('/api/demandeurs/:id', requireAuth, (req, res) => {
-  const d = readData('demandeurs.json')
+app.put('/api/demandeurs/:id', requireAuth, async (req, res) => {
+  const d = await readData('demandeurs.json')
   const idx = d.findIndex(x => x.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
 
@@ -1215,24 +1227,24 @@ app.put('/api/demandeurs/:id', requireAuth, (req, res) => {
   }
 
   d[idx] = after
-  writeData('demandeurs.json', d)
-  addLog(req.user, 'UPDATE_DEMANDEUR', d[idx].nom + ' ' + d[idx].prenom + (__motif ? ' - ' + __motif : ''))
+  await writeData('demandeurs.json', d)
+  await addLog(req.user, 'UPDATE_DEMANDEUR', d[idx].nom + ' ' + d[idx].prenom + (__motif ? ' - ' + __motif : ''))
   if (changes.length > 0) {
-    addAudit(req.user, 'demandeur', d[idx].id, d[idx].nom + ' ' + d[idx].prenom, 'modification', changes, __motif || '')
+    await addAudit(req.user, 'demandeur', d[idx].id, d[idx].nom + ' ' + d[idx].prenom, 'modification', changes, __motif || '')
   }
   res.json(d[idx])
 })
 
 // Archive (pas de vrai delete)
-app.delete('/api/demandeurs/:id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
-  const d = readData('demandeurs.json')
+app.delete('/api/demandeurs/:id', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
+  const d = await readData('demandeurs.json')
   const idx = d.findIndex(x => x.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
   const motif = (req.body && req.body.__motif) || (req.query && req.query.motif) || ''
   d[idx].statut = 'archive'
-  writeData('demandeurs.json', d)
-  addLog(req.user, 'ARCHIVE_DEMANDEUR', d[idx].nom + ' ' + d[idx].prenom + (motif ? ' - ' + motif : ''))
-  addAudit(req.user, 'demandeur', d[idx].id, d[idx].nom + ' ' + d[idx].prenom, 'archivage', [{ champ: 'statut', label: 'Statut', avant: 'actif', apres: 'archive' }], motif)
+  await writeData('demandeurs.json', d)
+  await addLog(req.user, 'ARCHIVE_DEMANDEUR', d[idx].nom + ' ' + d[idx].prenom + (motif ? ' - ' + motif : ''))
+  await addAudit(req.user, 'demandeur', d[idx].id, d[idx].nom + ' ' + d[idx].prenom, 'archivage', [{ champ: 'statut', label: 'Statut', avant: 'actif', apres: 'archive' }], motif)
   res.json({ ok: true })
 })
 
@@ -1241,21 +1253,21 @@ app.delete('/api/demandeurs/:id', requireAuth, requireRole('agent', 'directeur')
 // Statuts : vacant | attribue | archive
 // ============================================================
 
-app.get('/api/logements', requireAuth, (req, res) => {
-  let l = readData('logements.json')
+app.get('/api/logements', requireAuth, async (req, res) => {
+  let l = await readData('logements.json')
   l = l.filter(x => !x.statut || x.statut === 'vacant')
   res.json(l)
 })
 
-app.get('/api/logements/:id', requireAuth, (req, res) => {
-  const l = readData('logements.json')
+app.get('/api/logements/:id', requireAuth, async (req, res) => {
+  const l = await readData('logements.json')
   const item = l.find(x => x.id === req.params.id)
   if (!item) return res.status(404).json({ error: 'Non trouve' })
   res.json(item)
 })
 
-app.post('/api/logements', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
-  const l = readData('logements.json')
+app.post('/api/logements', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
+  const l = await readData('logements.json')
   const lhc = parseFloat(req.body.loyer_hc) || 0
   const ch = parseFloat(req.body.charges) || 0
   const item = {
@@ -1280,13 +1292,13 @@ app.post('/api/logements', requireAuth, requireRole('agent', 'directeur'), (req,
     statut: 'vacant'
   }
   l.push(item)
-  writeData('logements.json', l)
-  addLog(req.user, 'CREATE_LOGEMENT', item.adresse)
+  await writeData('logements.json', l)
+  await addLog(req.user, 'CREATE_LOGEMENT', item.adresse)
   res.status(201).json(item)
 })
 
-app.put('/api/logements/:id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
-  const l = readData('logements.json')
+app.put('/api/logements/:id', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
+  const l = await readData('logements.json')
   const idx = l.findIndex(x => x.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
 
@@ -1304,23 +1316,23 @@ app.put('/api/logements/:id', requireAuth, requireRole('agent', 'directeur'), (r
   }
 
   l[idx] = after
-  writeData('logements.json', l)
-  addLog(req.user, 'UPDATE_LOGEMENT', l[idx].adresse + (__motif ? ' - ' + __motif : ''))
+  await writeData('logements.json', l)
+  await addLog(req.user, 'UPDATE_LOGEMENT', l[idx].adresse + (__motif ? ' - ' + __motif : ''))
   if (changes.length > 0) {
-    addAudit(req.user, 'logement', l[idx].id, l[idx].ref + ' - ' + l[idx].adresse, 'modification', changes, __motif || '')
+    await addAudit(req.user, 'logement', l[idx].id, l[idx].ref + ' - ' + l[idx].adresse, 'modification', changes, __motif || '')
   }
   res.json(l[idx])
 })
 
-app.delete('/api/logements/:id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
-  const l = readData('logements.json')
+app.delete('/api/logements/:id', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
+  const l = await readData('logements.json')
   const idx = l.findIndex(x => x.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
   const motif = (req.body && req.body.__motif) || (req.query && req.query.motif) || ''
   l[idx].statut = 'archive'
-  writeData('logements.json', l)
-  addLog(req.user, 'ARCHIVE_LOGEMENT', l[idx].adresse + (motif ? ' - ' + motif : ''))
-  addAudit(req.user, 'logement', l[idx].id, l[idx].ref + ' - ' + l[idx].adresse, 'archivage', [{ champ: 'statut', label: 'Statut', avant: 'vacant', apres: 'archive' }], motif)
+  await writeData('logements.json', l)
+  await addLog(req.user, 'ARCHIVE_LOGEMENT', l[idx].adresse + (motif ? ' - ' + motif : ''))
+  await addAudit(req.user, 'logement', l[idx].id, l[idx].ref + ' - ' + l[idx].adresse, 'archivage', [{ champ: 'statut', label: 'Statut', avant: 'vacant', apres: 'archive' }], motif)
   res.json({ ok: true })
 })
 
@@ -1433,10 +1445,10 @@ function computeScore(dem, log, biais) {
 // MATCHING
 // ============================================================
 
-app.get('/api/matching/:logement_id', requireAuth, (req, res) => {
-  const logements = readData('logements.json')
-  const demandeurs = readData('demandeurs.json')
-  const ref = readObj('referentiels.json', {})
+app.get('/api/matching/:logement_id', requireAuth, async (req, res) => {
+  const logements = await readData('logements.json')
+  const demandeurs = await readData('demandeurs.json')
+  const ref = await readObj('referentiels.json', {})
   const biais = ref.historique_biais || {}
   const contingentsCfg = Array.isArray(ref.contingents_config) && ref.contingents_config.length
     ? ref.contingents_config
@@ -1470,9 +1482,9 @@ app.get('/api/matching/:logement_id', requireAuth, (req, res) => {
 
   const ineligible = results.filter(x => !x.res.eligible)
 
-  const audiences = readData('audiences.json')
+  const audiences = await readData('audiences.json')
 
-  addLog(req.user, 'MATCHING', 'Logement ' + log.ref + ' [' + logementContingent + '] - ' + conforme.length + ' eligibles conformes')
+  await addLog(req.user, 'MATCHING', 'Logement ' + log.ref + ' [' + logementContingent + '] - ' + conforme.length + ' eligibles conformes')
 
   res.json({
     logement: log,
@@ -1501,8 +1513,8 @@ app.get('/api/matching/:logement_id', requireAuth, (req, res) => {
 // Statuts : En attente proposition | En attente attribution | Attribue | Cloture
 // ============================================================
 
-app.get('/api/audiences', requireAuth, (req, res) => {
-  let a = readData('audiences.json')
+app.get('/api/audiences', requireAuth, async (req, res) => {
+  let a = await readData('audiences.json')
   const { elu_id, dem_id, statut } = req.query
   if (elu_id) a = a.filter(x => x.elu_id === elu_id)
   if (dem_id) a = a.filter(x => x.dem_id === dem_id)
@@ -1514,8 +1526,8 @@ app.get('/api/audiences', requireAuth, (req, res) => {
   res.json(a)
 })
 
-app.post('/api/audiences', requireAuth, (req, res) => {
-  const a = readData('audiences.json')
+app.post('/api/audiences', requireAuth, async (req, res) => {
+  const a = await readData('audiences.json')
   const item = {
     id: nextId(a, 'A'),
     date_audience: req.body.date_audience || nowDate(),
@@ -1532,15 +1544,15 @@ app.post('/api/audiences', requireAuth, (req, res) => {
     jours_total: null
   }
   a.push(item)
-  writeData('audiences.json', a)
+  await writeData('audiences.json', a)
 
   // Notification auto si favorable + dossier urgent
   if (item.favorable && item.dem_id) {
     try {
-      const demandeurs = readData('demandeurs.json')
+      const demandeurs = await readData('demandeurs.json')
       const dem = demandeurs.find(d => d.id === item.dem_id)
       if (dem && (dem.dalo || dem.violences || dem.sans_log || dem.prio_expulsion)) {
-        const notifs = readData('notifications.json')
+        const notifs = await readData('notifications.json')
         notifs.unshift({
           id: 'N' + Date.now(),
           date: nowDate(),
@@ -1554,21 +1566,21 @@ app.post('/api/audiences', requireAuth, (req, res) => {
           quartier: item.quartier_elu || '',
           lu: false
         })
-        writeData('notifications.json', notifs.slice(0, 500))
+        await writeData('notifications.json', notifs.slice(0, 500))
       }
     } catch (e) {}
   }
 
-  addLog(req.user, 'CREATE_AUDIENCE', item.objet)
+  await addLog(req.user, 'CREATE_AUDIENCE', item.objet)
   res.status(201).json(item)
 })
 
-app.put('/api/audiences/:id', requireAuth, (req, res) => {
-  const a = readData('audiences.json')
+app.put('/api/audiences/:id', requireAuth, async (req, res) => {
+  const a = await readData('audiences.json')
   const idx = a.findIndex(x => x.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
   a[idx] = { ...a[idx], ...req.body, id: a[idx].id }
-  writeData('audiences.json', a)
+  await writeData('audiences.json', a)
   res.json(a[idx])
 })
 
@@ -1576,14 +1588,14 @@ app.put('/api/audiences/:id', requireAuth, (req, res) => {
 // DECISIONS CAL
 // ============================================================
 
-app.get('/api/decisions-cal', requireAuth, (req, res) => {
-  const d = readData('decisions_cal.json')
+app.get('/api/decisions-cal', requireAuth, async (req, res) => {
+  const d = await readData('decisions_cal.json')
   res.json(d)
 })
 
-app.post('/api/decisions-cal', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+app.post('/api/decisions-cal', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
   const { logement_id, logement_ref, logement_adresse, date_cal, candidats } = req.body || {}
-  const decisions = readData('decisions_cal.json')
+  const decisions = await readData('decisions_cal.json')
 
   const decision = {
     id: 'CAL' + Date.now(),
@@ -1600,24 +1612,24 @@ app.post('/api/decisions-cal', requireAuth, requireRole('agent', 'directeur'), (
   // Mettre a jour statut audience si rang 1 attribue
   const rang1 = (candidats || []).find(c => c.decision && c.decision.includes('Retenu rang 1'))
   if (rang1) {
-    const audiences = readData('audiences.json')
+    const audiences = await readData('audiences.json')
     const idx = audiences.findIndex(a => a.dem_id === rang1.dem_id)
     if (idx >= 0) {
       audiences[idx].statut = 'Attribue'
       audiences[idx].quartier_attribue = logement_adresse
-      writeData('audiences.json', audiences)
+      await writeData('audiences.json', audiences)
     }
 
     // Mettre a jour statut logement
-    const logements = readData('logements.json')
+    const logements = await readData('logements.json')
     const lidx = logements.findIndex(l => l.id === logement_id)
     if (lidx >= 0) {
       logements[lidx].statut = 'attribue'
-      writeData('logements.json', logements)
+      await writeData('logements.json', logements)
     }
 
     // Mettre a jour statut demandeur
-    const demandeurs = readData('demandeurs.json')
+    const demandeurs = await readData('demandeurs.json')
     const didx = demandeurs.findIndex(d => d.id === rang1.dem_id)
     if (didx >= 0) {
       demandeurs[didx].statut = 'attribue'
@@ -1627,15 +1639,15 @@ app.post('/api/decisions-cal', requireAuth, requireRole('agent', 'directeur'), (
         type: 'Attribution',
         detail: 'Logement ' + logement_ref + ' - ' + logement_adresse
       })
-      writeData('demandeurs.json', demandeurs)
+      await writeData('demandeurs.json', demandeurs)
     }
 
     // Notification pour l elu concerne
     try {
-      const audiences2 = readData('audiences.json')
+      const audiences2 = await readData('audiences.json')
       const audFav = audiences2.find(a => a.dem_id === rang1.dem_id && a.favorable)
       if (audFav && audFav.elu_id) {
-        const notifs = readData('notifications.json')
+        const notifs = await readData('notifications.json')
         notifs.unshift({
           id: 'N' + Date.now(),
           date: nowDate(),
@@ -1649,14 +1661,14 @@ app.post('/api/decisions-cal', requireAuth, requireRole('agent', 'directeur'), (
           quartier: audFav.quartier_attribue || '',
           lu: false
         })
-        writeData('notifications.json', notifs.slice(0, 500))
+        await writeData('notifications.json', notifs.slice(0, 500))
       }
     } catch (e) {}
   }
 
   decisions.unshift(decision)
-  writeData('decisions_cal.json', decisions)
-  addLog(req.user, 'DECISION_CAL', 'Logement ' + logement_ref)
+  await writeData('decisions_cal.json', decisions)
+  await addLog(req.user, 'DECISION_CAL', 'Logement ' + logement_ref)
   res.status(201).json(decision)
 })
 
@@ -1681,19 +1693,19 @@ const MOTIFS_REFUS_CAL = [
   'Autre'
 ]
 
-app.get('/api/decision-cal/motifs', requireAuth, (req, res) => {
+app.get('/api/decision-cal/motifs', requireAuth, async (req, res) => {
   res.json(MOTIFS_REFUS_CAL)
 })
 
 // Historique des decisions pour un logement donne
-app.get('/api/decision-cal/logement/:logement_id', requireAuth, (req, res) => {
-  const decisions = readData('decisions_cal.json')
+app.get('/api/decision-cal/logement/:logement_id', requireAuth, async (req, res) => {
+  const decisions = await readData('decisions_cal.json')
   const filtered = decisions.filter(d => d.logement_id === req.params.logement_id)
   res.json(filtered)
 })
 
 // Nouvelle decision dediee : Valider / Refuser / Mettre en attente
-app.post('/api/decision-cal/:logement_id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+app.post('/api/decision-cal/:logement_id', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
   const { decision, dem_id, motif, commentaire, rang, score } = req.body || {}
   const logement_id = req.params.logement_id
 
@@ -1703,16 +1715,16 @@ app.post('/api/decision-cal/:logement_id', requireAuth, requireRole('agent', 'di
   if (!dem_id) return res.status(400).json({ error: 'dem_id requis' })
   if (decision === 'refuser' && !motif) return res.status(400).json({ error: 'motif obligatoire pour un refus' })
 
-  const logements = readData('logements.json')
+  const logements = await readData('logements.json')
   const log = logements.find(l => l.id === logement_id)
   if (!log) return res.status(404).json({ error: 'Logement introuvable' })
 
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const demIdx = demandeurs.findIndex(d => d.id === dem_id)
   if (demIdx < 0) return res.status(404).json({ error: 'Demandeur introuvable' })
   const dem = demandeurs[demIdx]
 
-  const decisions = readData('decisions_cal.json')
+  const decisions = await readData('decisions_cal.json')
   const decisionObj = {
     id: 'CAL' + Date.now(),
     logement_id,
@@ -1745,7 +1757,7 @@ app.post('/api/decision-cal/:logement_id', requireAuth, requireRole('agent', 'di
     const lidx = logements.findIndex(l => l.id === logement_id)
     if (lidx >= 0) {
       logements[lidx].statut = 'attribue'
-      writeData('logements.json', logements)
+      await writeData('logements.json', logements)
     }
     // Demandeur -> attribue + parcours
     demandeurs[demIdx].statut = 'attribue'
@@ -1755,15 +1767,15 @@ app.post('/api/decision-cal/:logement_id', requireAuth, requireRole('agent', 'di
       type: 'Attribution CAL',
       detail: 'Logement ' + log.ref + ' - ' + log.adresse + ' (mode decision dediee)'
     })
-    writeData('demandeurs.json', demandeurs)
+    await writeData('demandeurs.json', demandeurs)
 
     // Cloturer audience favorable si existe
-    const audiences = readData('audiences.json')
+    const audiences = await readData('audiences.json')
     const aIdx = audiences.findIndex(a => a.dem_id === dem_id && a.statut !== 'Attribue')
     if (aIdx >= 0) {
       audiences[aIdx].statut = 'Attribue'
       audiences[aIdx].quartier_attribue = log.adresse || log.quartier || ''
-      writeData('audiences.json', audiences)
+      await writeData('audiences.json', audiences)
     }
   } else if (decision === 'refuser') {
     // Parcours demandeur : refus motive
@@ -1773,7 +1785,7 @@ app.post('/api/decision-cal/:logement_id', requireAuth, requireRole('agent', 'di
       type: 'Refus CAL',
       detail: (log.ref || '-') + ' - motif : ' + motif + (commentaire ? ' (' + commentaire + ')' : '')
     })
-    writeData('demandeurs.json', demandeurs)
+    await writeData('demandeurs.json', demandeurs)
   } else if (decision === 'attente') {
     // Logement reste vacant, demandeur parcours mise en attente
     if (!Array.isArray(demandeurs[demIdx].parcours)) demandeurs[demIdx].parcours = []
@@ -1782,13 +1794,13 @@ app.post('/api/decision-cal/:logement_id', requireAuth, requireRole('agent', 'di
       type: 'Mise en attente CAL',
       detail: (log.ref || '-') + (commentaire ? ' - ' + commentaire : '')
     })
-    writeData('demandeurs.json', demandeurs)
+    await writeData('demandeurs.json', demandeurs)
   }
 
   decisions.unshift(decisionObj)
-  writeData('decisions_cal.json', decisions)
-  addLog(req.user, 'DECISION_CAL_DEDIEE', decision.toUpperCase() + ' - ' + log.ref + ' / ' + dem.nom + ' ' + dem.prenom + (motif ? ' - ' + motif : ''))
-  addAudit(req.user, 'logement', logement_id, log.ref || logement_id, 'decision_cal_' + decision,
+  await writeData('decisions_cal.json', decisions)
+  await addLog(req.user, 'DECISION_CAL_DEDIEE', decision.toUpperCase() + ' - ' + log.ref + ' / ' + dem.nom + ' ' + dem.prenom + (motif ? ' - ' + motif : ''))
+  await addAudit(req.user, 'logement', logement_id, log.ref || logement_id, 'decision_cal_' + decision,
     [{ label: 'Decision', avant: '-', apres: decision + (motif ? ' (' + motif + ')' : '') }],
     'Decision CAL dediee : ' + decision + ' pour ' + dem.nom + ' ' + dem.prenom)
 
@@ -1805,9 +1817,9 @@ function normalizeNomForDedup(s) {
   return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[\s\-']/g, '').trim()
 }
 
-app.get('/api/qualite-donnees', requireAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const logements = readData('logements.json')
+app.get('/api/qualite-donnees', requireAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
+  const logements = await readData('logements.json')
   const actifs = demandeurs.filter(d => d.statut === 'active')
 
   // 1. Doublons candidats : meme nom + prenom + date naissance normalises
@@ -1908,8 +1920,8 @@ app.get('/api/qualite-donnees', requireAuth, (req, res) => {
 // NOTIFICATIONS
 // ============================================================
 
-app.get('/api/notifications', requireAuth, (req, res) => {
-  let n = readData('notifications.json')
+app.get('/api/notifications', requireAuth, async (req, res) => {
+  let n = await readData('notifications.json')
   const { elu_id, lu } = req.query
   if (req.user.role === 'elu' && req.user.elu_id) {
     n = n.filter(x => x.elu_id === req.user.elu_id)
@@ -1920,18 +1932,18 @@ app.get('/api/notifications', requireAuth, (req, res) => {
   res.json(n)
 })
 
-app.put('/api/notifications/:id/lu', requireAuth, (req, res) => {
-  const n = readData('notifications.json')
+app.put('/api/notifications/:id/lu', requireAuth, async (req, res) => {
+  const n = await readData('notifications.json')
   const idx = n.findIndex(x => x.id === req.params.id)
-  if (idx !== -1) { n[idx].lu = true; writeData('notifications.json', n) }
+  if (idx !== -1) { n[idx].lu = true; await writeData('notifications.json', n) }
   res.json({ ok: true })
 })
 
-app.put('/api/notifications/tout-marquer-lu', requireAuth, (req, res) => {
-  const n = readData('notifications.json')
+app.put('/api/notifications/tout-marquer-lu', requireAuth, async (req, res) => {
+  const n = await readData('notifications.json')
   const { elu_id } = req.body || {}
   n.forEach(x => { if (!elu_id || x.elu_id === elu_id) x.lu = true })
-  writeData('notifications.json', n)
+  await writeData('notifications.json', n)
   res.json({ ok: true })
 })
 
@@ -1939,8 +1951,8 @@ app.put('/api/notifications/tout-marquer-lu', requireAuth, (req, res) => {
 // LOGS
 // ============================================================
 
-app.get('/api/logs', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
-  const logs = readData('logs.json')
+app.get('/api/logs', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
+  const logs = await readData('logs.json')
   const limit = parseInt(req.query.limit) || 200
   res.json(logs.slice(0, limit))
 })
@@ -1949,8 +1961,8 @@ app.get('/api/logs', requireAuth, requireRole('directeur', 'agent'), (req, res) 
 // AUDIT (tracabilite)
 // ============================================================
 
-app.get('/api/audit', requireAuth, (req, res) => {
-  let audit = readData('audit.json')
+app.get('/api/audit', requireAuth, async (req, res) => {
+  let audit = await readData('audit.json')
   const { entity_type, entity_id, limit } = req.query
   if (entity_type) audit = audit.filter(a => a.entity_type === entity_type)
   if (entity_id) audit = audit.filter(a => a.entity_id === entity_id)
@@ -1962,10 +1974,10 @@ app.get('/api/audit', requireAuth, (req, res) => {
 // ALERTES INTELLIGENTES
 // ============================================================
 
-app.get('/api/alertes', requireAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json').filter(d => d.statut === 'active')
-  const logements = readData('logements.json').filter(l => !l.statut || l.statut === 'vacant')
-  const audiences = readData('audiences.json')
+app.get('/api/alertes', requireAuth, async (req, res) => {
+  const demandeurs = (await readData('demandeurs.json')).filter(d => d.statut === 'active')
+  const logements = (await readData('logements.json')).filter(l => !l.statut || l.statut === 'vacant')
+  const audiences = await readData('audiences.json')
 
   const now = Date.now()
   const parseDateFr = (s) => {
@@ -2077,19 +2089,19 @@ const DEFAULT_SCORING_RULES = {
   ]
 }
 
-app.get('/api/scoring-rules', requireAuth, (req, res) => {
-  const ref = readObj('referentiels.json', {})
+app.get('/api/scoring-rules', requireAuth, async (req, res) => {
+  const ref = await readObj('referentiels.json', {})
   res.json(ref.scoring_rules || DEFAULT_SCORING_RULES)
 })
 
-app.put('/api/scoring-rules', requireAuth, requireRole('directeur'), (req, res) => {
-  const ref = readObj('referentiels.json', {})
+app.put('/api/scoring-rules', requireAuth, requireRole('directeur'), async (req, res) => {
+  const ref = await readObj('referentiels.json', {})
   const { __motif, ...rules } = req.body || {}
   const before = ref.scoring_rules || DEFAULT_SCORING_RULES
   ref.scoring_rules = rules
-  writeData('referentiels.json', ref)
-  addLog(req.user, 'UPDATE_SCORING_RULES', __motif || '')
-  addAudit(req.user, 'scoring_rules', 'global', 'Regles de scoring', 'modification',
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'UPDATE_SCORING_RULES', __motif || '')
+  await addAudit(req.user, 'scoring_rules', 'global', 'Regles de scoring', 'modification',
     [{ champ: 'rules', label: 'Regles de scoring', avant: 'version precedente', apres: 'nouvelle version' }],
     __motif || '')
   res.json(ref.scoring_rules)
@@ -2099,11 +2111,11 @@ app.put('/api/scoring-rules', requireAuth, requireRole('directeur'), (req, res) 
 // AGENDA / CALENDRIER : CAL, audiences, evenements
 // ============================================================
 
-app.get('/api/agenda', requireAuth, (req, res) => {
-  const audiences = readData('audiences.json')
-  const decisions = readData('decisions_cal.json')
-  const demandeurs = readData('demandeurs.json')
-  const ref = readObj('referentiels.json', { elus: [], evenements: [] })
+app.get('/api/agenda', requireAuth, async (req, res) => {
+  const audiences = await readData('audiences.json')
+  const decisions = await readData('decisions_cal.json')
+  const demandeurs = await readData('demandeurs.json')
+  const ref = await readObj('referentiels.json', { elus: [], evenements: [] })
   const elus = ref.elus || []
   const evts = ref.evenements || []
 
@@ -2161,8 +2173,8 @@ app.get('/api/agenda', requireAuth, (req, res) => {
   res.json(events)
 })
 
-app.post('/api/agenda', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
-  const ref = readObj('referentiels.json', { evenements: [] })
+app.post('/api/agenda', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
+  const ref = await readObj('referentiels.json', { evenements: [] })
   if (!ref.evenements) ref.evenements = []
   const ev = {
     id: 'EV' + Date.now(),
@@ -2174,20 +2186,20 @@ app.post('/api/agenda', requireAuth, requireRole('agent', 'directeur'), (req, re
     cree_par: req.user.prenom + ' ' + req.user.nom
   }
   ref.evenements.push(ev)
-  writeData('referentiels.json', ref)
-  addLog(req.user, 'CREATE_AGENDA', ev.titre)
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'CREATE_AGENDA', ev.titre)
   res.status(201).json(ev)
 })
 
-app.delete('/api/agenda/:id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
-  const ref = readObj('referentiels.json', { evenements: [] })
+app.delete('/api/agenda/:id', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
+  const ref = await readObj('referentiels.json', { evenements: [] })
   if (!ref.evenements) ref.evenements = []
   const idx = ref.evenements.findIndex(e => e.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Non trouve' })
   const ev = ref.evenements[idx]
   ref.evenements.splice(idx, 1)
-  writeData('referentiels.json', ref)
-  addLog(req.user, 'DELETE_AGENDA', ev.titre)
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'DELETE_AGENDA', ev.titre)
   res.json({ ok: true })
 })
 
@@ -2195,16 +2207,16 @@ app.delete('/api/agenda/:id', requireAuth, requireRole('agent', 'directeur'), (r
 // TIMELINE PAR DEMANDEUR (vue synthetique)
 // ============================================================
 
-app.get('/api/demandeurs/:id/timeline', requireAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
+app.get('/api/demandeurs/:id/timeline', requireAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
   const dem = demandeurs.find(d => d.id === req.params.id)
   if (!dem) return res.status(404).json({ error: 'Non trouve' })
 
-  const audiences = readData('audiences.json').filter(a => a.dem_id === dem.id)
-  const decisions = readData('decisions_cal.json').filter(dc => (dc.candidats || []).some(c => c.dem_id === dem.id))
-  const ref = readObj('referentiels.json', { elus: [] })
+  const audiences = (await readData('audiences.json')).filter(a => a.dem_id === dem.id)
+  const decisions = (await readData('decisions_cal.json')).filter(dc => (dc.candidats || []).some(c => c.dem_id === dem.id))
+  const ref = await readObj('referentiels.json', { elus: [] })
   const elus = ref.elus || []
-  const audit = readData('audit.json').filter(a => a.entity_type === 'demandeur' && a.entity_id === dem.id)
+  const audit = (await readData('audit.json')).filter(a => a.entity_type === 'demandeur' && a.entity_id === dem.id)
 
   const timeline = []
 
@@ -2256,11 +2268,11 @@ app.get('/api/demandeurs/:id/timeline', requireAuth, (req, res) => {
 // IMPORT
 // ============================================================
 
-app.post('/api/import/demandeurs', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+app.post('/api/import/demandeurs', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
   const { rows } = req.body || {}
   if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows requis' })
 
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const norm = s => (s || '').toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 
   let imported = 0; let updated = 0; let errors = 0
@@ -2290,16 +2302,16 @@ app.post('/api/import/demandeurs', requireAuth, requireRole('agent', 'directeur'
     } catch (e) { errors++ }
   }
 
-  writeData('demandeurs.json', demandeurs)
-  addLog(req.user, 'IMPORT_DEMANDEURS', imported + ' importes, ' + updated + ' mis a jour')
+  await writeData('demandeurs.json', demandeurs)
+  await addLog(req.user, 'IMPORT_DEMANDEURS', imported + ' importes, ' + updated + ' mis a jour')
   res.json({ imported, updated, errors })
 })
 
-app.post('/api/import/logements', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+app.post('/api/import/logements', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
   const { rows } = req.body || {}
   if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows requis' })
 
-  const logements = readData('logements.json')
+  const logements = await readData('logements.json')
   let imported = 0; let updated = 0; let errors = 0
 
   for (const row of rows) {
@@ -2316,16 +2328,16 @@ app.post('/api/import/logements', requireAuth, requireRole('agent', 'directeur')
     } catch (e) { errors++ }
   }
 
-  writeData('logements.json', logements)
+  await writeData('logements.json', logements)
   res.json({ imported, updated, errors })
 })
 
-app.post('/api/import/audiences', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+app.post('/api/import/audiences', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
   const { rows } = req.body || {}
   if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows requis' })
 
-  const demandeurs = readData('demandeurs.json')
-  const audiences = readData('audiences.json')
+  const demandeurs = await readData('demandeurs.json')
+  const audiences = await readData('audiences.json')
   const norm = s => (s || '').toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 
   let imported = 0; let matched = 0; let unmatched = 0; let errors = 0
@@ -2353,7 +2365,7 @@ app.post('/api/import/audiences', requireAuth, requireRole('agent', 'directeur')
     } catch (e) { errors++ }
   }
 
-  writeData('audiences.json', audiences)
+  await writeData('audiences.json', audiences)
   res.json({ imported, matched, unmatched, errors })
 })
 
@@ -2373,8 +2385,8 @@ function toCSV(rows, cols) {
   return bom + [header, ...lines].join('\n')
 }
 
-app.get('/api/export/demandeurs', requireAuth, (req, res) => {
-  const d = readData('demandeurs.json').filter(x => x.statut !== 'archive')
+app.get('/api/export/demandeurs', requireAuth, async (req, res) => {
+  const d = (await readData('demandeurs.json')).filter(x => x.statut !== 'archive')
   const cols = [
     { key: 'nud', label: 'NUD' },
     { key: 'nom', label: 'Nom' },
@@ -2397,8 +2409,8 @@ app.get('/api/export/demandeurs', requireAuth, (req, res) => {
   res.send(toCSV(d, cols))
 })
 
-app.get('/api/export/logements', requireAuth, (req, res) => {
-  const l = readData('logements.json').filter(x => !x.statut || x.statut === 'vacant')
+app.get('/api/export/logements', requireAuth, async (req, res) => {
+  const l = (await readData('logements.json')).filter(x => !x.statut || x.statut === 'vacant')
   const cols = [
     { key: 'ref', label: 'Reference' },
     { key: 'bailleur', label: 'Bailleur' },
@@ -2416,10 +2428,10 @@ app.get('/api/export/logements', requireAuth, (req, res) => {
   res.send(toCSV(l, cols))
 })
 
-app.get('/api/export/audiences', requireAuth, (req, res) => {
-  const audiences = readData('audiences.json')
-  const demandeurs = readData('demandeurs.json')
-  const ref = readObj('referentiels.json', { elus: [] })
+app.get('/api/export/audiences', requireAuth, async (req, res) => {
+  const audiences = await readData('audiences.json')
+  const demandeurs = await readData('demandeurs.json')
+  const ref = await readObj('referentiels.json', { elus: [] })
   const elus = ref.elus || []
   const cols = [
     { key: 'date_audience', label: 'Date' },
@@ -2440,11 +2452,11 @@ app.get('/api/export/audiences', requireAuth, (req, res) => {
 // RAPPORT MENSUEL
 // ============================================================
 
-app.get('/api/rapport-mensuel', requireAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const logements = readData('logements.json')
-  const audiences = readData('audiences.json')
-  const ref = readObj('referentiels.json', { elus: [] })
+app.get('/api/rapport-mensuel', requireAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
+  const logements = await readData('logements.json')
+  const audiences = await readData('audiences.json')
+  const ref = await readObj('referentiels.json', { elus: [] })
   const elus = ref.elus || []
 
   const actifs = demandeurs.filter(d => d.statut === 'active')
@@ -2531,12 +2543,6 @@ function parseMois(s) {
   return s
 }
 
-function getRapportsDir() {
-  const dir = join(DATA, 'rapports')
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  return dir
-}
-
 function estDansMois(dateStr, mois) {
   if (!dateStr) return false
   // Accepte "JJ/MM/AAAA" ou ISO
@@ -2552,12 +2558,12 @@ function estDansMois(dateStr, mois) {
   return ym === mois
 }
 
-function genererRapportMensuel(mois) {
-  const demandeurs = readData('demandeurs.json')
-  const logements = readData('logements.json')
-  const audiences = readData('audiences.json')
-  const decisions = readData('decisions_cal.json')
-  const courriers = readData('courriers.json')
+async function genererRapportMensuel(mois) {
+  const demandeurs = await readData('demandeurs.json')
+  const logements = await readData('logements.json')
+  const audiences = await readData('audiences.json')
+  const decisions = await readData('decisions_cal.json')
+  const courriers = await readData('courriers.json')
 
   const audMois = audiences.filter(a => estDansMois(a.date_audience, mois))
   const decMois = decisions.filter(d => estDansMois(d.date_cal || d.date, mois))
@@ -2651,44 +2657,48 @@ function genererRapportMensuel(mois) {
 }
 
 // Generer + archiver un rapport
-app.post('/api/rapports/generer-mensuel', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+// NOTE : les rapports mensuels sont stockés dans Supabase (clé virtuelle
+// "rapports/AAAA-MM.json") au lieu du système de fichiers local — un
+// déploiement serverless (Vercel) n'a pas de disque persistant entre deux
+// invocations.
+app.post('/api/rapports/generer-mensuel', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
   const mois = parseMois(req.body && req.body.mois)
-  const dir = getRapportsDir()
-  const path = join(dir, mois + '.json')
+  const key = 'rapports/' + mois + '.json'
   let rapport
   const force = req.body && req.body.force
-  if (existsSync(path) && !force) {
-    rapport = JSON.parse(readFileSync(path, 'utf8'))
+  const existing = await readObj(key, null)
+  if (existing && !force) {
+    rapport = existing
   } else {
-    rapport = genererRapportMensuel(mois)
-    writeFileSync(path, JSON.stringify(rapport, null, 2), 'utf8')
-    addLog(req.user, 'RAPPORT_MENSUEL', 'mois: ' + mois + (force ? ' (force)' : ''))
+    rapport = await genererRapportMensuel(mois)
+    await writeData(key, rapport)
+    await addLog(req.user, 'RAPPORT_MENSUEL', 'mois: ' + mois + (force ? ' (force)' : ''))
   }
   res.json(rapport)
 })
 
 // Lister les rapports archives
-app.get('/api/rapports', requireAuth, (req, res) => {
-  const dir = getRapportsDir()
-  const fichiers = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse() : []
-  res.json(fichiers.map(f => {
-    const st = statSync(join(dir, f))
-    return { mois: f.replace('.json', ''), size: st.size, mtime: st.mtime }
-  }))
+app.get('/api/rapports', requireAuth, async (req, res) => {
+  const all = await dbListFiles()
+  const fichiers = all.filter(f => f.file.startsWith('rapports/')).sort((a, b) => b.file.localeCompare(a.file))
+  res.json(fichiers.map(f => ({
+    mois: f.file.replace('rapports/', '').replace('.json', ''),
+    size: f.size_bytes,
+    mtime: new Date(f.updated_at).toISOString()
+  })))
 })
 
 // Consulter un rapport archive (JSON brut)
-app.get('/api/rapports/:mois', requireAuth, (req, res) => {
-  const path = join(getRapportsDir(), req.params.mois + '.json')
-  if (!existsSync(path)) return res.status(404).json({ error: 'Rapport introuvable' })
-  res.json(JSON.parse(readFileSync(path, 'utf8')))
+app.get('/api/rapports/:mois', requireAuth, async (req, res) => {
+  const rapport = await readObj('rapports/' + req.params.mois + '.json', null)
+  if (!rapport) return res.status(404).json({ error: 'Rapport introuvable' })
+  res.json(rapport)
 })
 
 // Vue HTML imprimable du rapport
-app.get('/api/rapports/:mois/html', requireAuth, (req, res) => {
-  const path = join(getRapportsDir(), req.params.mois + '.json')
-  if (!existsSync(path)) return res.status(404).json({ error: 'Rapport introuvable' })
-  const r = JSON.parse(readFileSync(path, 'utf8'))
+app.get('/api/rapports/:mois/html', requireAuth, async (req, res) => {
+  const r = await readObj('rapports/' + req.params.mois + '.json', null)
+  if (!r) return res.status(404).json({ error: 'Rapport introuvable' })
   const i = r.indicateurs
   const moisFr = new Date(r.mois + '-01').toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
 
@@ -2780,9 +2790,8 @@ ${r.details.pv_signes.map(p => '<tr><td>' + (p.date || '-') + '</td><td>' + (p.l
 
 // Envoi du digest mensuel sur Telegram (destinataires : directeur + agents connectes)
 app.post('/api/rapports/:mois/envoyer-telegram', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
-  const path = join(getRapportsDir(), req.params.mois + '.json')
-  if (!existsSync(path)) return res.status(404).json({ error: 'Rapport introuvable' })
-  const r = JSON.parse(readFileSync(path, 'utf8'))
+  const r = await readObj('rapports/' + req.params.mois + '.json', null)
+  if (!r) return res.status(404).json({ error: 'Rapport introuvable' })
   const i = r.indicateurs
   const moisFr = new Date(r.mois + '-01').toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
 
@@ -2799,12 +2808,12 @@ app.post('/api/rapports/:mois/envoyer-telegram', requireAuth, requireRole('direc
     '<i>Rapport complet disponible dans Logivia.</i>'
 
   // Destinataires : tous les users (agent/directeur) avec chat_id
-  const users = readData('users.json').filter(u => (u.role === 'directeur' || u.role === 'agent') && u.actif)
-  const chats = users.map(u => tgGetChatId('user_' + u.id)).filter(Boolean)
+  const users = (await readData('users.json')).filter(u => (u.role === 'directeur' || u.role === 'agent') && u.actif)
+  const chats = (await Promise.all(users.map(u => tgGetChatId('user_' + u.id)))).filter(Boolean)
   // Fallback : aussi les elus si demande
   if (req.body && req.body.inclure_elus) {
-    const elus = readObj('referentiels.json', { elus: [] }).elus || []
-    elus.forEach(e => { const c = tgGetChatId('elu_' + e.id); if (c) chats.push(c) })
+    const elus = (await readObj('referentiels.json', { elus: [] })).elus || []
+    for (const e of elus) { const c = await tgGetChatId('elu_' + e.id); if (c) chats.push(c) }
   }
 
   let envoyes = 0
@@ -2813,13 +2822,13 @@ app.post('/api/rapports/:mois/envoyer-telegram', requireAuth, requireRole('direc
     if (ok) envoyes++
   }
 
-  addLog(req.user, 'RAPPORT_TELEGRAM', 'mois: ' + r.mois + ' - envois: ' + envoyes + '/' + chats.length)
+  await addLog(req.user, 'RAPPORT_TELEGRAM', 'mois: ' + r.mois + ' - envois: ' + envoyes + '/' + chats.length)
   res.json({ ok: true, envoyes, total: chats.length })
 })
 
 // Cron endpoint : appelable par un scheduler externe pour generer auto le rapport
 // du mois precedent le 1er de chaque mois. Protege par secret en query.
-app.post('/api/rapports/cron', (req, res) => {
+app.post('/api/rapports/cron', async (req, res) => {
   const secret = req.query.secret || (req.body && req.body.secret)
   if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
     return res.status(401).json({ error: 'Secret cron invalide' })
@@ -2827,13 +2836,11 @@ app.post('/api/rapports/cron', (req, res) => {
   const d = new Date()
   d.setDate(1); d.setMonth(d.getMonth() - 1)
   const mois = d.toISOString().substring(0, 7)
-  const dir = getRapportsDir()
-  const path = join(dir, mois + '.json')
-  const rapport = genererRapportMensuel(mois)
-  writeFileSync(path, JSON.stringify(rapport, null, 2), 'utf8')
+  const rapport = await genererRapportMensuel(mois)
+  await writeData('rapports/' + mois + '.json', rapport)
   // Envoi Telegram automatique
-  const users = readData('users.json').filter(u => (u.role === 'directeur' || u.role === 'agent') && u.actif)
-  const chats = users.map(u => tgGetChatId('user_' + u.id)).filter(Boolean)
+  const users = (await readData('users.json')).filter(u => (u.role === 'directeur' || u.role === 'agent') && u.actif)
+  const chats = (await Promise.all(users.map(u => tgGetChatId('user_' + u.id)))).filter(Boolean)
   const i = rapport.indicateurs
   const moisFr = new Date(mois + '-01').toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
   const msg = '<b>[AUTO] Rapport mensuel - ' + moisFr + '</b>\n' +
@@ -2878,16 +2885,9 @@ const PIECES_ATTENDUES = [
 ]
 
 // --- SESSIONS PORTAIL ---
-// Sessions courtes (30 min) indexees par token opaque
-const PORTAIL_SESSIONS = new Map()
+// Sessions courtes (30 min), persistées dans Supabase (namespace 'portail')
+// au lieu d'une Map() en mémoire — nécessaire en serverless.
 const PORTAIL_TTL_MS = 30 * 60 * 1000
-
-function nettoyerSessionsExpirees() {
-  const now = Date.now()
-  for (const [tok, s] of PORTAIL_SESSIONS.entries()) {
-    if (s.expire_at < now) PORTAIL_SESSIONS.delete(tok)
-  }
-}
 
 function normNud(s) { return (s || '').toLowerCase().replace(/[\s-]/g, '') }
 function normDate(s) {
@@ -2899,28 +2899,32 @@ function normDate(s) {
   return s
 }
 
-function findDemByNud(nud) {
-  const demandeurs = readData('demandeurs.json')
+async function findDemByNud(nud) {
+  const demandeurs = await readData('demandeurs.json')
   return demandeurs.find(d => d.nud && normNud(d.nud) === normNud(nud))
 }
 
-function requirePortailAuth(req, res, next) {
-  nettoyerSessionsExpirees()
-  const tok = req.headers['x-portail-token'] || (req.query && req.query.token)
-  if (!tok) return res.status(401).json({ error: 'Non authentifie' })
-  const sess = PORTAIL_SESSIONS.get(tok)
-  if (!sess) return res.status(401).json({ error: 'Session expiree' })
-  // Rafraichit le TTL a chaque requete
-  sess.expire_at = Date.now() + PORTAIL_TTL_MS
-  req.portailDem = sess.dem_id
-  next()
+async function requirePortailAuth(req, res, next) {
+  try {
+    const tok = req.headers['x-portail-token'] || (req.query && req.query.token)
+    if (!tok) return res.status(401).json({ error: 'Non authentifie' })
+    const sess = await ephGet('portail', tok)
+    if (!sess) return res.status(401).json({ error: 'Session expiree' })
+    // Rafraichit le TTL a chaque requete
+    await ephSet('portail', tok, sess, PORTAIL_TTL_MS)
+    req.portailDem = sess.dem_id
+    next()
+  } catch (e) {
+    console.error('[requirePortailAuth]', e.message)
+    res.status(500).json({ error: 'Erreur serveur (session portail)' })
+  }
 }
 
 // Auth portail : NUD + date de naissance
-app.post('/api/portail/auth', rlPortailAuth, (req, res) => {
+app.post('/api/portail/auth', rlPortailAuth, async (req, res) => {
   const { nud, date_naissance } = req.body || {}
   if (!nud) return res.status(400).json({ error: 'NUD requis' })
-  const dem = findDemByNud(nud)
+  const dem = await findDemByNud(nud)
   if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
 
   // Si le demandeur n a pas de date de naissance dans sa fiche, on accepte
@@ -2930,18 +2934,14 @@ app.post('/api/portail/auth', rlPortailAuth, (req, res) => {
       return res.status(400).json({ error: 'Date de naissance requise', need_dob: true })
     }
     if (normDate(date_naissance) !== normDate(dem.date_naissance)) {
-      addLog(null, 'PORTAIL_AUTH_KO', 'nud: ' + nud + ' (dob mismatch)')
+      await addLog(null, 'PORTAIL_AUTH_KO', 'nud: ' + nud + ' (dob mismatch)')
       return res.status(401).json({ error: 'Informations incorrectes' })
     }
   }
 
   const token = randomBytes(24).toString('hex')
-  PORTAIL_SESSIONS.set(token, {
-    dem_id: dem.id,
-    nud: dem.nud,
-    expire_at: Date.now() + PORTAIL_TTL_MS
-  })
-  addLog(null, 'PORTAIL_AUTH_OK', 'nud: ' + dem.nud)
+  await ephSet('portail', token, { dem_id: dem.id, nud: dem.nud }, PORTAIL_TTL_MS)
+  await addLog(null, 'PORTAIL_AUTH_OK', 'nud: ' + dem.nud)
   res.json({
     ok: true,
     token,
@@ -2951,9 +2951,9 @@ app.post('/api/portail/auth', rlPortailAuth, (req, res) => {
 })
 
 // Deconnexion
-app.post('/api/portail/logout', requirePortailAuth, (req, res) => {
+app.post('/api/portail/logout', requirePortailAuth, async (req, res) => {
   const tok = req.headers['x-portail-token']
-  PORTAIL_SESSIONS.delete(tok)
+  await ephDelete('portail', tok)
   res.json({ ok: true })
 })
 
@@ -2963,16 +2963,15 @@ app.post('/api/portail/logout', requirePortailAuth, (req, res) => {
 try {
   mountFranceConnect(app, {
     readData,
-    createSessionFor: (dem_id) => {
+    createSessionFor: async (dem_id) => {
       const token = randomBytes(24).toString('hex')
-      const demandeurs = readData('demandeurs.json')
+      const demandeurs = await readData('demandeurs.json')
       const dem = demandeurs.find(d => d.id === dem_id)
-      PORTAIL_SESSIONS.set(token, {
+      await ephSet('portail', token, {
         dem_id,
         nud: dem ? dem.nud : '',
-        expire_at: Date.now() + PORTAIL_TTL_MS,
         via: 'franceconnect'
-      })
+      }, PORTAIL_TTL_MS)
       return token
     },
     addLog
@@ -2983,11 +2982,11 @@ try {
 }
 
 // Dossier complet du candidat authentifie (remplace l ancien dossier public)
-app.get('/api/portail/dossier', requirePortailAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const audiences = readData('audiences.json')
-  const decisions = readData('decisions_cal.json')
-  const propositions = readData('propositions.json')
+app.get('/api/portail/dossier', requirePortailAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
+  const audiences = await readData('audiences.json')
+  const decisions = await readData('decisions_cal.json')
+  const propositions = await readData('propositions.json')
   const dem = demandeurs.find(d => d.id === req.portailDem)
   if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
 
@@ -3065,16 +3064,11 @@ app.get('/api/portail/dossier', requirePortailAuth, (req, res) => {
 })
 
 // --- PIECES JUSTIFICATIVES ---
+// Stockées dans Supabase Storage (bucket "logivia-pieces"), plus de disque local.
 
-function getPiecesDir(demId) {
-  const dir = join(DATA, 'pieces', demId)
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  return dir
-}
-
-app.get('/api/portail/pieces', requirePortailAuth, (req, res) => {
-  const pieces = readData('pieces_justificatives.json')
-  const dem = readData('demandeurs.json').find(d => d.id === req.portailDem)
+app.get('/api/portail/pieces', requirePortailAuth, async (req, res) => {
+  const pieces = await readData('pieces_justificatives.json')
+  const dem = (await readData('demandeurs.json')).find(d => d.id === req.portailDem)
   const miennes = pieces.filter(p => p.dem_id === req.portailDem).map(p => ({
     id: p.id,
     code: p.code,
@@ -3095,7 +3089,7 @@ app.get('/api/portail/pieces', requirePortailAuth, (req, res) => {
   })
 })
 
-app.post('/api/portail/pieces/upload', rlUpload, requirePortailAuth, (req, res) => {
+app.post('/api/portail/pieces/upload', rlUpload, requirePortailAuth, async (req, res) => {
   const { code, filename, mimetype, contenu_base64 } = req.body || {}
   if (!code) return res.status(400).json({ error: 'Code piece requis' })
   if (!PIECES_ATTENDUES.find(p => p.code === code)) return res.status(400).json({ error: 'Type de piece inconnu' })
@@ -3110,12 +3104,15 @@ app.post('/api/portail/pieces/upload', rlUpload, requirePortailAuth, (req, res) 
     return res.status(400).json({ error: 'Type de fichier non autorise (PDF, JPG, PNG uniquement)' })
   }
 
-  const all = readData('pieces_justificatives.json')
+  const all = await readData('pieces_justificatives.json')
   const id = 'P' + Date.now() + randomBytes(3).toString('hex')
   const ext = (filename || '').split('.').pop() || (mimetype === 'application/pdf' ? 'pdf' : 'jpg')
   const safeName = id + '.' + ext.toLowerCase().replace(/[^a-z0-9]/g, '')
-  const dir = getPiecesDir(req.portailDem)
-  writeFileSync(join(dir, safeName), buf)
+  try {
+    await uploadPiece(req.portailDem, safeName, buf, mimetype)
+  } catch (e) {
+    return res.status(500).json({ error: 'Echec de l\'enregistrement du fichier : ' + e.message })
+  }
 
   const piece = {
     id,
@@ -3131,10 +3128,10 @@ app.post('/api/portail/pieces/upload', rlUpload, requirePortailAuth, (req, res) 
     motif_rejet: null
   }
   all.push(piece)
-  writeData('pieces_justificatives.json', all)
+  await writeData('pieces_justificatives.json', all)
 
   // Ajouter un parcours dans le demandeur
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const idx = demandeurs.findIndex(d => d.id === req.portailDem)
   if (idx !== -1) {
     if (!demandeurs[idx].parcours) demandeurs[idx].parcours = []
@@ -3143,42 +3140,42 @@ app.post('/api/portail/pieces/upload', rlUpload, requirePortailAuth, (req, res) 
       type: 'Depot de piece',
       detail: 'Via portail : ' + (PIECES_ATTENDUES.find(x => x.code === code) || {}).libelle
     })
-    writeData('demandeurs.json', demandeurs)
+    await writeData('demandeurs.json', demandeurs)
   }
 
-  addLog(null, 'PORTAIL_UPLOAD_PIECE', 'dem: ' + req.portailDem + ' - ' + code + ' - ' + buf.length + ' octets')
+  await addLog(null, 'PORTAIL_UPLOAD_PIECE', 'dem: ' + req.portailDem + ' - ' + code + ' - ' + buf.length + ' octets')
   res.json({ ok: true, piece })
 })
 
-app.delete('/api/portail/pieces/:id', requirePortailAuth, (req, res) => {
-  const all = readData('pieces_justificatives.json')
+app.delete('/api/portail/pieces/:id', requirePortailAuth, async (req, res) => {
+  const all = await readData('pieces_justificatives.json')
   const idx = all.findIndex(p => p.id === req.params.id && p.dem_id === req.portailDem)
   if (idx === -1) return res.status(404).json({ error: 'Piece introuvable' })
   if (all[idx].statut === 'validee') return res.status(403).json({ error: 'Piece deja validee - impossible de supprimer' })
   // Supprimer le fichier physique
-  try { unlinkSync(join(getPiecesDir(req.portailDem), all[idx].stored_name)) } catch (e) { }
+  try { await deletePiece(req.portailDem, all[idx].stored_name) } catch (e) { }
   const removed = all.splice(idx, 1)[0]
-  writeData('pieces_justificatives.json', all)
-  addLog(null, 'PORTAIL_DELETE_PIECE', 'dem: ' + req.portailDem + ' - ' + removed.code)
+  await writeData('pieces_justificatives.json', all)
+  await addLog(null, 'PORTAIL_DELETE_PIECE', 'dem: ' + req.portailDem + ' - ' + removed.code)
   res.json({ ok: true })
 })
 
 // Telechargement par le candidat de sa propre piece
-app.get('/api/portail/pieces/:id/fichier', requirePortailAuth, (req, res) => {
-  const all = readData('pieces_justificatives.json')
+app.get('/api/portail/pieces/:id/fichier', requirePortailAuth, async (req, res) => {
+  const all = await readData('pieces_justificatives.json')
   const p = all.find(x => x.id === req.params.id && x.dem_id === req.portailDem)
   if (!p) return res.status(404).json({ error: 'Piece introuvable' })
-  const path = join(getPiecesDir(req.portailDem), p.stored_name)
-  if (!existsSync(path)) return res.status(404).json({ error: 'Fichier physique absent' })
+  const buf = await downloadPiece(req.portailDem, p.stored_name)
+  if (!buf) return res.status(404).json({ error: 'Fichier physique absent' })
   res.type(p.mimetype || 'application/octet-stream')
   res.setHeader('Content-Disposition', 'inline; filename="' + encodeURIComponent(p.filename) + '"')
-  res.send(readFileSync(path))
+  res.send(buf)
 })
 
 // --- COTE AGENT : validation / rejet des pieces ---
 
-app.get('/api/pieces/:dem_id', requireAuth, (req, res) => {
-  const pieces = readData('pieces_justificatives.json').filter(p => p.dem_id === req.params.dem_id)
+app.get('/api/pieces/:dem_id', requireAuth, async (req, res) => {
+  const pieces = (await readData('pieces_justificatives.json')).filter(p => p.dem_id === req.params.dem_id)
   res.json({
     pieces_attendues: PIECES_ATTENDUES,
     pieces: pieces.map(p => ({
@@ -3188,49 +3185,49 @@ app.get('/api/pieces/:dem_id', requireAuth, (req, res) => {
   })
 })
 
-app.get('/api/pieces/:dem_id/:id/fichier', requireAuth, (req, res) => {
-  const p = readData('pieces_justificatives.json').find(x => x.id === req.params.id && x.dem_id === req.params.dem_id)
+app.get('/api/pieces/:dem_id/:id/fichier', requireAuth, async (req, res) => {
+  const p = (await readData('pieces_justificatives.json')).find(x => x.id === req.params.id && x.dem_id === req.params.dem_id)
   if (!p) return res.status(404).json({ error: 'Piece introuvable' })
-  const path = join(getPiecesDir(req.params.dem_id), p.stored_name)
-  if (!existsSync(path)) return res.status(404).json({ error: 'Fichier physique absent' })
+  const buf = await downloadPiece(req.params.dem_id, p.stored_name)
+  if (!buf) return res.status(404).json({ error: 'Fichier physique absent' })
   res.type(p.mimetype || 'application/octet-stream')
   res.setHeader('Content-Disposition', 'inline; filename="' + encodeURIComponent(p.filename) + '"')
-  res.send(readFileSync(path))
+  res.send(buf)
 })
 
-app.post('/api/pieces/:id/valider', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
-  const all = readData('pieces_justificatives.json')
+app.post('/api/pieces/:id/valider', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
+  const all = await readData('pieces_justificatives.json')
   const idx = all.findIndex(p => p.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Piece introuvable' })
   all[idx].statut = 'validee'
   all[idx].validee_le = new Date().toISOString()
   all[idx].validee_par = req.user.prenom + ' ' + req.user.nom
   all[idx].motif_rejet = null
-  writeData('pieces_justificatives.json', all)
-  addLog(req.user, 'PIECE_VALIDEE', all[idx].id + ' / ' + all[idx].code)
+  await writeData('pieces_justificatives.json', all)
+  await addLog(req.user, 'PIECE_VALIDEE', all[idx].id + ' / ' + all[idx].code)
   res.json(all[idx])
 })
 
-app.post('/api/pieces/:id/refuser', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+app.post('/api/pieces/:id/refuser', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
   const { motif } = req.body || {}
   if (!motif) return res.status(400).json({ error: 'Motif de refus requis' })
-  const all = readData('pieces_justificatives.json')
+  const all = await readData('pieces_justificatives.json')
   const idx = all.findIndex(p => p.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Piece introuvable' })
   all[idx].statut = 'refusee'
   all[idx].motif_rejet = motif
   all[idx].validee_le = new Date().toISOString()
   all[idx].validee_par = req.user.prenom + ' ' + req.user.nom
-  writeData('pieces_justificatives.json', all)
-  addLog(req.user, 'PIECE_REFUSEE', all[idx].id + ' / ' + motif)
+  await writeData('pieces_justificatives.json', all)
+  await addLog(req.user, 'PIECE_REFUSEE', all[idx].id + ' / ' + motif)
   res.json(all[idx])
 })
 
 // --- PROPOSITIONS : accepter / refuser cote candidat ---
 
-app.get('/api/portail/propositions', requirePortailAuth, (req, res) => {
-  const props = readData('propositions.json').filter(p => p.dem_id === req.portailDem)
-  const logements = readData('logements.json')
+app.get('/api/portail/propositions', requirePortailAuth, async (req, res) => {
+  const props = (await readData('propositions.json')).filter(p => p.dem_id === req.portailDem)
+  const logements = await readData('logements.json')
   const enrichies = props.map(p => {
     const l = logements.find(x => x.id === p.logement_id) || {}
     return {
@@ -3244,12 +3241,12 @@ app.get('/api/portail/propositions', requirePortailAuth, (req, res) => {
   res.json(enrichies)
 })
 
-app.post('/api/portail/proposition/:id/repondre', requirePortailAuth, (req, res) => {
+app.post('/api/portail/proposition/:id/repondre', requirePortailAuth, async (req, res) => {
   const { reponse, motif } = req.body || {}
   if (!['acceptee', 'refusee'].includes(reponse)) return res.status(400).json({ error: 'Reponse invalide' })
   if (reponse === 'refusee' && !motif) return res.status(400).json({ error: 'Motif requis pour un refus' })
 
-  const all = readData('propositions.json')
+  const all = await readData('propositions.json')
   const idx = all.findIndex(p => p.id === req.params.id && p.dem_id === req.portailDem)
   if (idx === -1) return res.status(404).json({ error: 'Proposition introuvable' })
   if (all[idx].statut !== 'en_attente') return res.status(409).json({ error: 'Cette proposition est deja traitee' })
@@ -3257,7 +3254,7 @@ app.post('/api/portail/proposition/:id/repondre', requirePortailAuth, (req, res)
   // Verifier le delai
   if (all[idx].deadline && new Date(all[idx].deadline) < new Date()) {
     all[idx].statut = 'expiree'
-    writeData('propositions.json', all)
+    await writeData('propositions.json', all)
     return res.status(410).json({ error: 'Delai depasse - la proposition a expire' })
   }
 
@@ -3265,10 +3262,10 @@ app.post('/api/portail/proposition/:id/repondre', requirePortailAuth, (req, res)
   all[idx].motif_refus = motif || null
   all[idx].repondu_le = new Date().toISOString()
   all[idx].repondu_par = 'candidat_portail'
-  writeData('propositions.json', all)
+  await writeData('propositions.json', all)
 
   // Trace parcours
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const di = demandeurs.findIndex(d => d.id === req.portailDem)
   if (di !== -1) {
     if (!demandeurs[di].parcours) demandeurs[di].parcours = []
@@ -3277,17 +3274,17 @@ app.post('/api/portail/proposition/:id/repondre', requirePortailAuth, (req, res)
       type: 'Reponse proposition',
       detail: reponse === 'acceptee' ? 'Proposition acceptee via portail' : 'Refus via portail - ' + motif
     })
-    writeData('demandeurs.json', demandeurs)
+    await writeData('demandeurs.json', demandeurs)
   }
-  addLog(null, 'PORTAIL_PROPOSITION_' + reponse.toUpperCase(), 'prop: ' + all[idx].id)
+  await addLog(null, 'PORTAIL_PROPOSITION_' + reponse.toUpperCase(), 'prop: ' + all[idx].id)
   res.json({ ok: true, proposition: all[idx] })
 })
 
 // Cote agent : creer une proposition pour un demandeur (apres CAL favorable)
-app.post('/api/propositions', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+app.post('/api/propositions', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
   const { dem_id, logement_id, decision_cal_id } = req.body || {}
   if (!dem_id || !logement_id) return res.status(400).json({ error: 'dem_id et logement_id requis' })
-  const all = readData('propositions.json')
+  const all = await readData('propositions.json')
   const deadline = new Date(); deadline.setDate(deadline.getDate() + 10)
   const prop = {
     id: 'PROP' + Date.now() + randomBytes(3).toString('hex'),
@@ -3298,21 +3295,21 @@ app.post('/api/propositions', requireAuth, requireRole('agent', 'directeur'), (r
     cree_par: req.user.prenom + ' ' + req.user.nom
   }
   all.push(prop)
-  writeData('propositions.json', all)
-  addLog(req.user, 'PROPOSITION_CREEE', prop.id + ' dem: ' + dem_id)
+  await writeData('propositions.json', all)
+  await addLog(req.user, 'PROPOSITION_CREEE', prop.id + ' dem: ' + dem_id)
   res.json(prop)
 })
 
 // Liste cote agent
-app.get('/api/propositions', requireAuth, (req, res) => {
-  const all = readData('propositions.json')
+app.get('/api/propositions', requireAuth, async (req, res) => {
+  const all = await readData('propositions.json')
   res.json(all)
 })
 
 // --- RENOUVELLEMENT ---
 
-app.post('/api/portail/renouveler', requirePortailAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
+app.post('/api/portail/renouveler', requirePortailAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
   const idx = demandeurs.findIndex(d => d.id === req.portailDem)
   if (idx === -1) return res.status(404).json({ error: 'Dossier introuvable' })
 
@@ -3324,8 +3321,8 @@ app.post('/api/portail/renouveler', requirePortailAuth, (req, res) => {
     type: 'Renouvellement',
     detail: 'Renouvellement de la demande via portail candidat'
   })
-  writeData('demandeurs.json', demandeurs)
-  addLog(null, 'PORTAIL_RENOUVELLEMENT', 'dem: ' + req.portailDem)
+  await writeData('demandeurs.json', demandeurs)
+  await addLog(null, 'PORTAIL_RENOUVELLEMENT', 'dem: ' + req.portailDem)
 
   const limite = new Date(now); limite.setFullYear(limite.getFullYear() + 1)
   res.json({
@@ -3337,10 +3334,10 @@ app.post('/api/portail/renouveler', requirePortailAuth, (req, res) => {
 
 // --- DEFINITION DATE DE NAISSANCE (premiere connexion en mode compat) ---
 
-app.post('/api/portail/date-naissance', requirePortailAuth, (req, res) => {
+app.post('/api/portail/date-naissance', requirePortailAuth, async (req, res) => {
   const { date_naissance } = req.body || {}
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date_naissance || '')) return res.status(400).json({ error: 'Format attendu : YYYY-MM-DD' })
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const idx = demandeurs.findIndex(d => d.id === req.portailDem)
   if (idx === -1) return res.status(404).json({ error: 'Dossier introuvable' })
   if (demandeurs[idx].date_naissance) {
@@ -3348,19 +3345,19 @@ app.post('/api/portail/date-naissance', requirePortailAuth, (req, res) => {
     return res.status(403).json({ error: 'Date de naissance deja definie - contactez le service habitat pour toute modification' })
   }
   demandeurs[idx].date_naissance = date_naissance
-  writeData('demandeurs.json', demandeurs)
-  addLog(null, 'PORTAIL_DOB_SET', 'dem: ' + req.portailDem)
+  await writeData('demandeurs.json', demandeurs)
+  await addLog(null, 'PORTAIL_DOB_SET', 'dem: ' + req.portailDem)
   res.json({ ok: true })
 })
 
 // --- ATTESTATION OFFICIELLE PDF (HTML imprimable) ---
 
-app.get('/api/portail/attestation', requirePortailAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
+app.get('/api/portail/attestation', requirePortailAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
   const dem = demandeurs.find(d => d.id === req.portailDem)
   if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
 
-  const users = readData('users.json')
+  const users = await readData('users.json')
   const directeur = users.find(u => u.role === 'directeur' && u.actif) || { nom: '[Directeur]', prenom: '' }
 
   const now = new Date()
@@ -3465,13 +3462,13 @@ app.get('/api/portail/attestation', requirePortailAuth, (req, res) => {
 // ============================================================
 
 // Art. 15 : export complet des donnees du candidat (JSON)
-app.get('/api/portail/mes-donnees', requirePortailAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const audiences = readData('audiences.json')
-  const decisions = readData('decisions_cal.json')
-  const propositions = readData('propositions.json')
-  const pieces = readData('pieces_justificatives.json')
-  const rgpdReqs = readData('rgpd_demandes.json')
+app.get('/api/portail/mes-donnees', requirePortailAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
+  const audiences = await readData('audiences.json')
+  const decisions = await readData('decisions_cal.json')
+  const propositions = await readData('propositions.json')
+  const pieces = await readData('pieces_justificatives.json')
+  const rgpdReqs = await readData('rgpd_demandes.json')
 
   const dem = demandeurs.find(d => d.id === req.portailDem)
   if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
@@ -3485,7 +3482,7 @@ app.get('/api/portail/mes-donnees', requirePortailAuth, (req, res) => {
   })
   const mesDemandesRgpd = rgpdReqs.filter(r => r.dem_id === dem.id)
 
-  addLog(null, 'RGPD_EXPORT_DONNEES', 'dem: ' + dem.id)
+  await addLog(null, 'RGPD_EXPORT_DONNEES', 'dem: ' + dem.id)
 
   const out = {
     genere_le: new Date().toISOString(),
@@ -3504,7 +3501,7 @@ app.get('/api/portail/mes-donnees', requirePortailAuth, (req, res) => {
 })
 
 // Art. 16/17/18/21 : soumission d une demande d exercice de droit
-app.post('/api/portail/demande-rgpd', rlRgpdReq, requirePortailAuth, (req, res) => {
+app.post('/api/portail/demande-rgpd', rlRgpdReq, requirePortailAuth, async (req, res) => {
   const { droit, message } = req.body || {}
   const DROITS_VALIDES = ['acces', 'rectification', 'effacement', 'limitation', 'opposition', 'portabilite']
   if (!DROITS_VALIDES.includes(droit)) {
@@ -3517,7 +3514,7 @@ app.post('/api/portail/demande-rgpd', rlRgpdReq, requirePortailAuth, (req, res) 
     return res.status(400).json({ error: 'Message trop long (2000 caracteres max).' })
   }
 
-  const all = readData('rgpd_demandes.json')
+  const all = await readData('rgpd_demandes.json')
   const demande = {
     id: 'RGPD' + Date.now() + randomBytes(3).toString('hex'),
     dem_id: req.portailDem,
@@ -3531,8 +3528,8 @@ app.post('/api/portail/demande-rgpd', rlRgpdReq, requirePortailAuth, (req, res) 
     traitee_par: null
   }
   all.push(demande)
-  writeData('rgpd_demandes.json', all)
-  addLog(null, 'RGPD_DEMANDE_RECUE', 'dem: ' + req.portailDem + ' droit: ' + droit)
+  await writeData('rgpd_demandes.json', all)
+  await addLog(null, 'RGPD_DEMANDE_RECUE', 'dem: ' + req.portailDem + ' droit: ' + droit)
 
   // Notification au DPO
   try { tgSend('[RGPD] Nouvelle demande ' + droit + ' - dem ' + req.portailDem + ' - ref ' + demande.id).catch(() => {}) } catch (e) {}
@@ -3546,8 +3543,8 @@ app.post('/api/portail/demande-rgpd', rlRgpdReq, requirePortailAuth, (req, res) 
 })
 
 // Liste des demandes RGPD du candidat
-app.get('/api/portail/mes-demandes-rgpd', requirePortailAuth, (req, res) => {
-  const all = readData('rgpd_demandes.json')
+app.get('/api/portail/mes-demandes-rgpd', requirePortailAuth, async (req, res) => {
+  const all = await readData('rgpd_demandes.json')
   const miennes = all.filter(r => r.dem_id === req.portailDem).sort((a, b) => (b.soumise_le || '').localeCompare(a.soumise_le || ''))
   res.json(miennes)
 })
@@ -3556,9 +3553,9 @@ app.get('/api/portail/mes-demandes-rgpd', requirePortailAuth, (req, res) => {
 // RGPD ADMIN : cote DPO / directeur
 // ============================================================
 
-app.get('/api/rgpd/demandes', requireAuth, requireRole('directeur'), (req, res) => {
-  const all = readData('rgpd_demandes.json').sort((a, b) => (b.soumise_le || '').localeCompare(a.soumise_le || ''))
-  const demandeurs = readData('demandeurs.json')
+app.get('/api/rgpd/demandes', requireAuth, requireRole('directeur'), async (req, res) => {
+  const all = (await readData('rgpd_demandes.json')).sort((a, b) => (b.soumise_le || '').localeCompare(a.soumise_le || ''))
+  const demandeurs = await readData('demandeurs.json')
   const enrichies = all.map(r => {
     const d = demandeurs.find(x => x.id === r.dem_id)
     return {
@@ -3570,13 +3567,13 @@ app.get('/api/rgpd/demandes', requireAuth, requireRole('directeur'), (req, res) 
   res.json(enrichies)
 })
 
-app.post('/api/rgpd/demandes/:id/repondre', requireAuth, requireRole('directeur'), (req, res) => {
+app.post('/api/rgpd/demandes/:id/repondre', requireAuth, requireRole('directeur'), async (req, res) => {
   const { reponse, statut } = req.body || {}
   const STATUTS = ['accordee', 'refusee', 'partiellement_accordee']
   if (!STATUTS.includes(statut)) return res.status(400).json({ error: 'Statut invalide' })
   if (!reponse || reponse.length < 10) return res.status(400).json({ error: 'Reponse requise (10 car. min)' })
 
-  const all = readData('rgpd_demandes.json')
+  const all = await readData('rgpd_demandes.json')
   const idx = all.findIndex(r => r.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Demande introuvable' })
 
@@ -3584,20 +3581,20 @@ app.post('/api/rgpd/demandes/:id/repondre', requireAuth, requireRole('directeur'
   all[idx].statut = statut
   all[idx].traitee_le = new Date().toISOString()
   all[idx].traitee_par = (req.user.prenom || '') + ' ' + (req.user.nom || '')
-  writeData('rgpd_demandes.json', all)
-  addLog(req.user, 'RGPD_DEMANDE_TRAITEE', all[idx].id + ' statut: ' + statut)
+  await writeData('rgpd_demandes.json', all)
+  await addLog(req.user, 'RGPD_DEMANDE_TRAITEE', all[idx].id + ' statut: ' + statut)
 
   res.json(all[idx])
 })
 
 // --- COMPAT : ancien endpoint dossier public (lecture seule, pas de pieces ni propositions) ---
 // Utilise par les anciens liens. Redirige vers le nouveau flow d auth.
-app.get('/api/portail/dossier/:nud', (req, res) => {
+app.get('/api/portail/dossier/:nud', async (req, res) => {
   // Conserve pour compat descendante : retourne un dossier minimal sans auth DOB
   const dem = findDemByNud(req.params.nud)
   if (!dem) return res.status(404).json({ error: 'Dossier introuvable' })
-  const audiences = readData('audiences.json')
-  const decisions = readData('decisions_cal.json')
+  const audiences = await readData('audiences.json')
+  const decisions = await readData('decisions_cal.json')
 
   const audPubliques = audiences
     .filter(a => a.dem_id === dem.id)
@@ -3640,8 +3637,8 @@ app.get('/api/portail/dossier/:nud', (req, res) => {
 // MATCH CANDIDAT (pour import)
 // ============================================================
 
-app.post('/api/match-candidat', requireAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
+app.post('/api/match-candidat', requireAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
   const { nud, nom, prenom } = req.body || {}
   const norm = s => (s || '').toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 
@@ -3671,20 +3668,20 @@ function qrFor(url) {
 }
 
 // Statut Telegram d un elu (connecte / non)
-app.get('/api/telegram/statut/elu/:id', requireAuth, (req, res) => {
-  const chatId = tgGetChatId('elu', req.params.id)
+app.get('/api/telegram/statut/elu/:id', requireAuth, async (req, res) => {
+  const chatId = await tgGetChatId('elu', req.params.id)
   res.json({ connecte: !!chatId, chat_id: chatId || null })
 })
 
 // Statut Telegram d un demandeur
-app.get('/api/telegram/statut/demandeur/:id', requireAuth, (req, res) => {
-  const chatId = tgGetChatId('demandeur', req.params.id)
+app.get('/api/telegram/statut/demandeur/:id', requireAuth, async (req, res) => {
+  const chatId = await tgGetChatId('demandeur', req.params.id)
   res.json({ connecte: !!chatId, chat_id: chatId || null })
 })
 
 // Lien de connexion personnel pour un elu (avec QR code)
-app.get('/api/telegram/lien-elu/:id', requireAuth, (req, res) => {
-  const ref = readObj('referentiels.json', {})
+app.get('/api/telegram/lien-elu/:id', requireAuth, async (req, res) => {
+  const ref = await readObj('referentiels.json', {})
   const elu = (ref.elus || []).find(e => e.id === req.params.id)
   if (!elu) return res.status(404).json({ error: 'Elu introuvable' })
   const lien = genererLienElu(elu.id)
@@ -3692,8 +3689,8 @@ app.get('/api/telegram/lien-elu/:id', requireAuth, (req, res) => {
 })
 
 // Lien de connexion personnel pour un candidat
-app.get('/api/telegram/lien-candidat/:id', requireAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
+app.get('/api/telegram/lien-candidat/:id', requireAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
   const dem = demandeurs.find(d => d.id === req.params.id)
   if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
   const lien = genererLienCandidat(dem.id)
@@ -3701,39 +3698,39 @@ app.get('/api/telegram/lien-candidat/:id', requireAuth, (req, res) => {
 })
 
 // Enregistrer manuellement un chat_id pour un elu (utile pour test sans webhook)
-app.post('/api/telegram/register-elu/:id', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+app.post('/api/telegram/register-elu/:id', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
   const chatId = req.body && req.body.chat_id
   if (!chatId) return res.status(400).json({ error: 'chat_id requis' })
-  tgSaveChatId('elu', req.params.id, chatId)
-  addLog(req.user, 'TELEGRAM_REGISTER_ELU', 'elu ' + req.params.id + ' chat_id ' + chatId)
+  await tgSaveChatId('elu', req.params.id, chatId)
+  await addLog(req.user, 'TELEGRAM_REGISTER_ELU', 'elu ' + req.params.id + ' chat_id ' + chatId)
   res.json({ ok: true })
 })
 
 // Enregistrer manuellement un chat_id pour un demandeur
-app.post('/api/telegram/register-demandeur/:id', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+app.post('/api/telegram/register-demandeur/:id', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
   const chatId = req.body && req.body.chat_id
   if (!chatId) return res.status(400).json({ error: 'chat_id requis' })
-  tgSaveChatId('demandeur', req.params.id, chatId)
-  addLog(req.user, 'TELEGRAM_REGISTER_DEM', 'dem ' + req.params.id + ' chat_id ' + chatId)
+  await tgSaveChatId('demandeur', req.params.id, chatId)
+  await addLog(req.user, 'TELEGRAM_REGISTER_DEM', 'dem ' + req.params.id + ' chat_id ' + chatId)
   res.json({ ok: true })
 })
 
 // Envoyer un message test a un elu connecte
 app.post('/api/telegram/test/:id', requireAuth, async (req, res) => {
-  const chatId = tgGetChatId('elu', req.params.id)
+  const chatId = await tgGetChatId('elu', req.params.id)
   if (!chatId) return res.status(400).json({ error: 'Elu non connecte' })
-  const ref = readObj('referentiels.json', {})
+  const ref = await readObj('referentiels.json', {})
   const elu = (ref.elus || []).find(e => e.id === req.params.id)
   const ok = await tgSend(chatId, '[ok] <b>Message de test Logivia</b>\n\nBonjour ' + (elu ? elu.prenom + ' ' + elu.nom : '') + ',\n\nCe message confirme que les notifications Telegram fonctionnent pour votre compte.\n\n<i>Envoye depuis le tableau de bord Logivia - Saint-Denis.</i>')
-  addLog(req.user, 'TELEGRAM_TEST', 'elu ' + req.params.id)
+  await addLog(req.user, 'TELEGRAM_TEST', 'elu ' + req.params.id)
   res.json({ ok })
 })
 
 // Envoyer un message test a un candidat connecte
 app.post('/api/telegram/test-candidat/:id', requireAuth, async (req, res) => {
-  const chatId = tgGetChatId('demandeur', req.params.id)
+  const chatId = await tgGetChatId('demandeur', req.params.id)
   if (!chatId) return res.status(400).json({ error: 'Candidat non connecte' })
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const dem = demandeurs.find(d => d.id === req.params.id)
   const ok = await tgSend(chatId, '[ok] <b>Message de test Logivia</b>\n\nBonjour ' + (dem ? dem.prenom : '') + ',\n\nCe message confirme que les notifications Telegram fonctionnent pour votre dossier.\n\n<i>Ville de Saint-Denis - Service Habitat.</i>')
   res.json({ ok })
@@ -3743,7 +3740,7 @@ app.post('/api/telegram/test-candidat/:id', requireAuth, async (req, res) => {
 app.post('/api/telegram/digest', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
   try {
     await envoyerDigestHebdo()
-    addLog(req.user, 'TELEGRAM_DIGEST', 'envoi manuel')
+    await addLog(req.user, 'TELEGRAM_DIGEST', 'envoi manuel')
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -3765,7 +3762,7 @@ app.post('/api/telegram/test-direct', requireAuth, requireRole('directeur', 'age
   try {
     const result = await tgSend(String(chat_id), messageFinal)
     if (result && result.ok) {
-      addLog(req.user, 'TELEGRAM_TEST', 'chat_id: ' + chat_id)
+      await addLog(req.user, 'TELEGRAM_TEST', 'chat_id: ' + chat_id)
       return res.json({ ok: true, message_id: result.result && result.result.message_id })
     }
     return res.status(500).json({ ok: false, error: (result && result.description) || 'Erreur Telegram inconnue' })
@@ -3791,7 +3788,7 @@ app.post('/api/telegram/setup-webhook', requireAuth, requireRole('directeur'), a
       body: JSON.stringify({ url: webhookUrl, allowed_updates: ['message'] })
     })
     const data = await r.json()
-    addLog(req.user, 'TELEGRAM_WEBHOOK', 'URL: ' + webhookUrl + ' - ' + (data.description || ''))
+    await addLog(req.user, 'TELEGRAM_WEBHOOK', 'URL: ' + webhookUrl + ' - ' + (data.description || ''))
     res.json({ ok: data.ok, webhook_url: webhookUrl, telegram_response: data })
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message })
@@ -3823,9 +3820,9 @@ app.post('/api/telegram/webhook', async (req, res) => {
 })
 
 // Liste des elus avec leur etat de connexion
-app.get('/api/telegram/elus-status', requireAuth, (req, res) => {
-  const ref = readObj('referentiels.json', {})
-  const all = tgGetAllChatIds('elu')
+app.get('/api/telegram/elus-status', requireAuth, async (req, res) => {
+  const ref = await readObj('referentiels.json', {})
+  const all = await tgGetAllChatIds('elu')
   const out = (ref.elus || []).map(e => ({
     id: e.id, nom: e.nom, prenom: e.prenom || '', secteur: e.secteur,
     connecte: !!all[e.id], chat_id: all[e.id] || null
@@ -3976,8 +3973,8 @@ Service Habitat - Mairie de Saint-Denis de La Reunion`
 }
 
 // Lister les courriers
-app.get('/api/courriers', requireAuth, (req, res) => {
-  const all = readData('courriers.json')
+app.get('/api/courriers', requireAuth, async (req, res) => {
+  const all = await readData('courriers.json')
   const qDem = req.query.dem_id
   const qStatut = req.query.statut
   let out = all
@@ -3988,15 +3985,15 @@ app.get('/api/courriers', requireAuth, (req, res) => {
 })
 
 // Templates dispos
-app.get('/api/courriers/templates', requireAuth, (req, res) => {
+app.get('/api/courriers/templates', requireAuth, async (req, res) => {
   res.json(Object.entries(COURRIER_TEMPLATES).map(([k, v]) => ({
     statut: k, libelle: v.libelle, couleur: v.couleur, objet: v.objet
   })))
 })
 
 // Statistiques courriers
-app.get('/api/courriers/stats', requireAuth, (req, res) => {
-  const all = readData('courriers.json')
+app.get('/api/courriers/stats', requireAuth, async (req, res) => {
+  const all = await readData('courriers.json')
   const byStatut = {}
   for (const s of COURRIER_STATUTS) byStatut[s] = 0
   for (const c of all) byStatut[c.statut] = (byStatut[c.statut] || 0) + 1
@@ -4008,12 +4005,12 @@ app.post('/api/courriers', requireAuth, async (req, res) => {
   const { dem_id, statut, objet, corps, envoyer_telegram, pieces, objet_relance, logement_ref, bailleur } = req.body || {}
   if (!dem_id || !statut) return res.status(400).json({ error: 'dem_id et statut requis' })
   if (!COURRIER_STATUTS.includes(statut)) return res.status(400).json({ error: 'statut invalide' })
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const dem = demandeurs.find(d => d.id === dem_id)
   if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
 
   const tpl = COURRIER_TEMPLATES[statut]
-  const all = readData('courriers.json')
+  const all = await readData('courriers.json')
   const opts = { pieces, objet_relance, logement_ref, bailleur }
   const courrier = {
     id: nextId(all, 'CO'),
@@ -4038,7 +4035,7 @@ app.post('/api/courriers', requireAuth, async (req, res) => {
 
   // Envoi Telegram si demande et candidat connecte
   if (envoyer_telegram) {
-    const chatId = tgGetChatId('demandeur', dem_id)
+    const chatId = await tgGetChatId('demandeur', dem_id)
     if (chatId) {
       const headline = '<b>' + tpl.libelle.toUpperCase() + '</b>\n<b>' + courrier.objet + '</b>\n\n'
       const ok = await tgSend(chatId, headline + courrier.corps)
@@ -4059,7 +4056,7 @@ app.post('/api/courriers', requireAuth, async (req, res) => {
   }
 
   all.push(courrier)
-  writeData('courriers.json', all)
+  await writeData('courriers.json', all)
 
   // Parcours + audit
   const idx = demandeurs.findIndex(d => d.id === dem_id)
@@ -4070,10 +4067,10 @@ app.post('/api/courriers', requireAuth, async (req, res) => {
       type: 'Courrier officiel',
       detail: tpl.libelle + (courrier.telegram_envoye ? ' - envoye par Telegram' : ' - archive dossier')
     })
-    writeData('demandeurs.json', demandeurs)
+    await writeData('demandeurs.json', demandeurs)
   }
-  addLog(req.user, 'COURRIER_CREATION', dem.nom + ' ' + dem.prenom + ' / ' + tpl.libelle)
-  addAudit(req.user, 'demandeur', dem_id, dem.nom + ' ' + dem.prenom, 'courrier_' + statut, [{ label: 'Courrier officiel', avant: '-', apres: tpl.libelle }], 'Courrier officiel : ' + tpl.libelle)
+  await addLog(req.user, 'COURRIER_CREATION', dem.nom + ' ' + dem.prenom + ' / ' + tpl.libelle)
+  await addAudit(req.user, 'demandeur', dem_id, dem.nom + ' ' + dem.prenom, 'courrier_' + statut, [{ label: 'Courrier officiel', avant: '-', apres: tpl.libelle }], 'Courrier officiel : ' + tpl.libelle)
 
   res.json(courrier)
 })
@@ -4161,11 +4158,11 @@ function renderCourrierHtml(courrier, dem) {
 }
 
 // Telechargement PDF d un courrier existant (retourne HTML imprimable)
-app.get('/api/courriers/:id/pdf', requireAuth, (req, res) => {
-  const all = readData('courriers.json')
+app.get('/api/courriers/:id/pdf', requireAuth, async (req, res) => {
+  const all = await readData('courriers.json')
   const courrier = all.find(c => c.id === req.params.id)
   if (!courrier) return res.status(404).send('Courrier introuvable')
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const dem = demandeurs.find(d => d.id === courrier.dem_id) || {}
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
   res.send(renderCourrierHtml(courrier, dem))
@@ -4187,7 +4184,31 @@ function paragraphesFromCorps(corps) {
   return String(corps || '').split(/\n/).map(s => s.trim()).filter(Boolean)
 }
 
-function runDocxGenerator(payload) {
+// Génération du .docx : en production (Vercel), appelle la fonction
+// serverless Python dédiée (api/generate-docx.py), puisqu'un environnement
+// Node serverless n'a pas de binaire python3 disponible pour spawn().
+// En dev local (npm run server), on garde le spawn python3 existant.
+async function runDocxGenerator(payload) {
+  if (process.env.VERCEL || process.env.DOCX_SERVICE_URL) {
+    const base = process.env.DOCX_SERVICE_URL ||
+      (process.env.VERCEL_URL ? 'https://' + process.env.VERCEL_URL : null)
+    if (!base) throw new Error('DOCX_SERVICE_URL non configuré (nécessaire hors Vercel)')
+    const resp = await fetch(base + '/api/generate-docx', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-secret': process.env.DOCX_SERVICE_SECRET || ''
+      },
+      body: JSON.stringify(payload)
+    })
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => '')
+      throw new Error('generate-docx (Vercel Python) a échoué : ' + resp.status + ' ' + t.slice(0, 200))
+    }
+    return Buffer.from(await resp.arrayBuffer())
+  }
+
+  // Fallback dev local : spawn python3 sur le script historique.
   return new Promise((resolve, reject) => {
     const tmpDir = join(__dirname, 'data', 'tmp_docx')
     try { if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true }) } catch (e) {}
@@ -4200,7 +4221,11 @@ function runDocxGenerator(payload) {
     child.on('close', code => {
       if (code !== 0) return reject(new Error('generate_docx.py exit ' + code + ' : ' + stderr))
       if (!existsSync(outPath)) return reject(new Error('docx non cree'))
-      resolve(outPath)
+      try {
+        const buf = readFileSync(outPath)
+        unlinkSync(outPath)
+        resolve(buf)
+      } catch (e) { reject(e) }
     })
     child.stdin.end(JSON.stringify(payload))
   })
@@ -4209,10 +4234,10 @@ function runDocxGenerator(payload) {
 // DOCX d un courrier deja enregistre
 app.get('/api/courriers/:id/docx', requireAuth, async (req, res) => {
   try {
-    const all = readData('courriers.json')
+    const all = await readData('courriers.json')
     const courrier = all.find(c => c.id === req.params.id)
     if (!courrier) return res.status(404).json({ error: 'Courrier introuvable' })
-    const demandeurs = readData('demandeurs.json')
+    const demandeurs = await readData('demandeurs.json')
     const dem = demandeurs.find(d => d.id === courrier.dem_id) || {}
 
     const adr = parseAdresseLines(dem)
@@ -4234,14 +4259,11 @@ app.get('/api/courriers/:id/docx', requireAuth, async (req, res) => {
       paragraphes: paragraphesFromCorps(courrier.corps),
       signature_line: 'Pour le Maire, l Adjoint delegue au Logement'
     }
-    const outPath = await runDocxGenerator(payload)
+    const docxBuf = await runDocxGenerator(payload)
     const filename = 'courrier_' + (courrier.id || 'LOGIVIA') + '.docx'
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
     res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"')
-    res.sendFile(outPath, err => {
-      try { unlinkSync(outPath) } catch (e) {}
-      if (err && !res.headersSent) res.status(500).json({ error: err.message })
-    })
+    res.send(docxBuf)
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -4250,7 +4272,7 @@ app.get('/api/courriers/:id/docx', requireAuth, async (req, res) => {
 // DOCX : fiche candidat (export brut d un dossier demandeur)
 app.get('/api/demandeurs/:id/docx', requireAuth, async (req, res) => {
   try {
-    const demandeurs = readData('demandeurs.json')
+    const demandeurs = await readData('demandeurs.json')
     const dem = demandeurs.find(d => d.id === req.params.id)
     if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
 
@@ -4296,14 +4318,11 @@ app.get('/api/demandeurs/:id/docx', requireAuth, async (req, res) => {
       paragraphes,
       signature_line: 'Document edite par le Service Habitat'
     }
-    const outPath = await runDocxGenerator(payload)
+    const docxBuf = await runDocxGenerator(payload)
     const filename = 'fiche_' + (dem.nud || dem.id) + '.docx'
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
     res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"')
-    res.sendFile(outPath, err => {
-      try { unlinkSync(outPath) } catch (e) {}
-      if (err && !res.headersSent) res.status(500).json({ error: err.message })
-    })
+    res.send(docxBuf)
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -4315,7 +4334,7 @@ app.post('/api/courriers/preview-docx', requireAuth, async (req, res) => {
     const { dem_id, statut, objet, corps, pieces, objet_relance, logement_ref, bailleur } = req.body || {}
     if (!dem_id || !statut) return res.status(400).json({ error: 'dem_id et statut requis' })
     if (!COURRIER_STATUTS.includes(statut)) return res.status(400).json({ error: 'statut invalide' })
-    const demandeurs = readData('demandeurs.json')
+    const demandeurs = await readData('demandeurs.json')
     const dem = demandeurs.find(d => d.id === dem_id)
     if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
     const tpl = COURRIER_TEMPLATES[statut]
@@ -4340,24 +4359,21 @@ app.post('/api/courriers/preview-docx', requireAuth, async (req, res) => {
       paragraphes: paragraphesFromCorps(corpsFinal),
       signature_line: 'Pour le Maire, l Adjoint delegue au Logement'
     }
-    const outPath = await runDocxGenerator(payload)
+    const docxBuf = await runDocxGenerator(payload)
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
     res.setHeader('Content-Disposition', 'attachment; filename="apercu_' + statut + '.docx"')
-    res.sendFile(outPath, err => {
-      try { unlinkSync(outPath) } catch (e) {}
-      if (err && !res.headersSent) res.status(500).json({ error: err.message })
-    })
+    res.send(docxBuf)
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
 })
 
 // Apercu imprimable avant creation (pour les 4 boutons : genere le courrier ET affiche le PDF)
-app.post('/api/courriers/preview', requireAuth, (req, res) => {
+app.post('/api/courriers/preview', requireAuth, async (req, res) => {
   const { dem_id, statut, objet, corps, pieces, objet_relance, logement_ref, bailleur } = req.body || {}
   if (!dem_id || !statut) return res.status(400).json({ error: 'dem_id et statut requis' })
   if (!COURRIER_STATUTS.includes(statut)) return res.status(400).json({ error: 'statut invalide' })
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const dem = demandeurs.find(d => d.id === dem_id)
   if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
   const tpl = COURRIER_TEMPLATES[statut]
@@ -4376,10 +4392,10 @@ app.post('/api/courriers/preview', requireAuth, (req, res) => {
 })
 
 // Changer le statut d un courrier (reclassification)
-app.put('/api/courriers/:id/statut', requireAuth, (req, res) => {
+app.put('/api/courriers/:id/statut', requireAuth, async (req, res) => {
   const { statut, motif } = req.body || {}
   if (!COURRIER_STATUTS.includes(statut)) return res.status(400).json({ error: 'statut invalide' })
-  const all = readData('courriers.json')
+  const all = await readData('courriers.json')
   const idx = all.findIndex(c => c.id === req.params.id)
   if (idx < 0) return res.status(404).json({ error: 'Courrier introuvable' })
   const ancien = all[idx].statut
@@ -4394,21 +4410,21 @@ app.put('/api/courriers/:id/statut', requireAuth, (req, res) => {
     ancien,
     motif: motif || ''
   })
-  writeData('courriers.json', all)
-  addAudit(req.user, 'courrier', req.params.id, all[idx].dem_nom, 'changement_statut', [{ label: 'Statut courrier', avant: COURRIER_TEMPLATES[ancien].libelle, apres: COURRIER_TEMPLATES[statut].libelle }], motif || ('Changement statut courrier vers ' + COURRIER_TEMPLATES[statut].libelle))
+  await writeData('courriers.json', all)
+  await addAudit(req.user, 'courrier', req.params.id, all[idx].dem_nom, 'changement_statut', [{ label: 'Statut courrier', avant: COURRIER_TEMPLATES[ancien].libelle, apres: COURRIER_TEMPLATES[statut].libelle }], motif || ('Changement statut courrier vers ' + COURRIER_TEMPLATES[statut].libelle))
   res.json(all[idx])
 })
 
 // Supprimer un courrier (directeur uniquement)
-app.delete('/api/courriers/:id', requireAuth, requireRole('directeur'), (req, res) => {
-  const all = readData('courriers.json')
+app.delete('/api/courriers/:id', requireAuth, requireRole('directeur'), async (req, res) => {
+  const all = await readData('courriers.json')
   const idx = all.findIndex(c => c.id === req.params.id)
   if (idx < 0) return res.status(404).json({ error: 'Courrier introuvable' })
   const motif = (req.body && req.body.motif) || ''
   if (!motif) return res.status(400).json({ error: 'Motif requis', need_motif: true })
   const removed = all.splice(idx, 1)[0]
-  writeData('courriers.json', all)
-  addAudit(req.user, 'courrier', req.params.id, removed.dem_nom, 'suppression', [], motif)
+  await writeData('courriers.json', all)
+  await addAudit(req.user, 'courrier', req.params.id, removed.dem_nom, 'suppression', [], motif)
   res.json({ ok: true })
 })
 
@@ -4419,10 +4435,19 @@ app.delete('/api/courriers/:id', requireAuth, requireRole('directeur'), (req, re
 /**
  * SSE endpoint : le token est passe en query string car EventSource
  * ne permet pas d'envoyer des headers custom.
+ *
+ * LIMITATION CONNUE (déploiement Vercel serverless) : chaque invocation
+ * de fonction est isolée et à durée limitée. La présence/diffusion en
+ * temps réel ne se propage donc qu'aux clients connectés à la même
+ * instance chaude, et la connexion peut être coupée par le time-out de
+ * la plateforme. L'application reste pleinement fonctionnelle (toutes
+ * les données se rechargent normalement via les routes REST), seule la
+ * notification "live" est dégradée. Migration recommandée en phase 2 :
+ * Supabase Realtime (canaux Postgres) à la place des Maps SSE en mémoire.
  */
-app.get('/api/events', (req, res) => {
+app.get('/api/events', async (req, res) => {
   const token = req.query.token
-  const session = getSession(token)
+  const session = await getSession(token)
   if (!session) {
     res.status(401).end('Session invalide')
     return
@@ -4430,7 +4455,7 @@ app.get('/api/events', (req, res) => {
   registerSseClient(res, session.user)
 })
 
-app.get('/api/presence', requireAuth, (req, res) => {
+app.get('/api/presence', requireAuth, async (req, res) => {
   res.json({
     users: rtGetPresence(),
     connected_count: rtConnectedCount(),
@@ -4438,11 +4463,11 @@ app.get('/api/presence', requireAuth, (req, res) => {
   })
 })
 
-app.get('/api/presence/on/:entity_type/:entity_id', requireAuth, (req, res) => {
+app.get('/api/presence/on/:entity_type/:entity_id', requireAuth, async (req, res) => {
   res.json({ users: rtWhoIsOnEntity(req.params.entity_type, req.params.entity_id) })
 })
 
-app.post('/api/presence/viewing', requireAuth, (req, res) => {
+app.post('/api/presence/viewing', requireAuth, async (req, res) => {
   const { entity_type, entity_id } = req.body || {}
   rtSetPresence(req.user, {
     online: true,
@@ -4452,7 +4477,7 @@ app.post('/api/presence/viewing', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
-app.post('/api/presence/editing', requireAuth, (req, res) => {
+app.post('/api/presence/editing', requireAuth, async (req, res) => {
   const { entity_type, entity_id } = req.body || {}
   rtSetPresence(req.user, {
     online: true,
@@ -4462,12 +4487,12 @@ app.post('/api/presence/editing', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
-app.post('/api/presence/ping', requireAuth, (req, res) => {
+app.post('/api/presence/ping', requireAuth, async (req, res) => {
   rtSetPresence(req.user, { online: true })
   res.json({ ok: true })
 })
 
-app.post('/api/locks/acquire', requireAuth, (req, res) => {
+app.post('/api/locks/acquire', requireAuth, async (req, res) => {
   const { entity_type, entity_id } = req.body || {}
   if (!entity_type || !entity_id) return res.status(400).json({ error: 'entity_type et entity_id requis' })
   const result = rtAcquireLock(req.user, entity_type, entity_id)
@@ -4475,7 +4500,7 @@ app.post('/api/locks/acquire', requireAuth, (req, res) => {
   res.json(result)
 })
 
-app.post('/api/locks/release', requireAuth, (req, res) => {
+app.post('/api/locks/release', requireAuth, async (req, res) => {
   const { entity_type, entity_id } = req.body || {}
   if (!entity_type || !entity_id) return res.status(400).json({ error: 'entity_type et entity_id requis' })
   const result = rtReleaseLock(req.user, entity_type, entity_id)
@@ -4483,11 +4508,11 @@ app.post('/api/locks/release', requireAuth, (req, res) => {
   res.json(result)
 })
 
-app.get('/api/locks', requireAuth, (req, res) => {
+app.get('/api/locks', requireAuth, async (req, res) => {
   res.json({ locks: rtGetAllLocks() })
 })
 
-app.get('/api/locks/:entity_type/:entity_id', requireAuth, (req, res) => {
+app.get('/api/locks/:entity_type/:entity_id', requireAuth, async (req, res) => {
   res.json({ lock: rtGetLock(req.params.entity_type, req.params.entity_id) })
 })
 
@@ -4508,8 +4533,8 @@ function extractMentions(texte) {
   return Array.from(out)
 }
 
-app.get('/api/commentaires/:entity_type/:entity_id', requireAuth, (req, res) => {
-  const all = readData('commentaires.json')
+app.get('/api/commentaires/:entity_type/:entity_id', requireAuth, async (req, res) => {
+  const all = await readData('commentaires.json')
   const rows = all.filter(c =>
     c.entity_type === req.params.entity_type &&
     c.entity_id === req.params.entity_id
@@ -4517,18 +4542,18 @@ app.get('/api/commentaires/:entity_type/:entity_id', requireAuth, (req, res) => 
   res.json(rows)
 })
 
-app.post('/api/commentaires', requireAuth, (req, res) => {
+app.post('/api/commentaires', requireAuth, async (req, res) => {
   const { entity_type, entity_id, texte } = req.body || {}
   if (!entity_type || !entity_id) return res.status(400).json({ error: 'entity_type et entity_id requis' })
   if (!texte || !texte.trim()) return res.status(400).json({ error: 'Texte requis' })
 
-  const users = readData('users.json')
+  const users = await readData('users.json')
   const mentionsLogins = extractMentions(texte)
   const mentionedUsers = users
     .filter(u => u.actif && mentionsLogins.includes((u.login || '').toLowerCase()))
     .map(u => ({ id: u.id, login: u.login, nom: u.nom, prenom: u.prenom }))
 
-  const all = readData('commentaires.json')
+  const all = await readData('commentaires.json')
   const comment = {
     id: nextId(all, 'CM'),
     entity_type,
@@ -4543,10 +4568,10 @@ app.post('/api/commentaires', requireAuth, (req, res) => {
     reactions: {}
   }
   all.push(comment)
-  writeData('commentaires.json', all)
+  await writeData('commentaires.json', all)
 
-  addLog(req.user, 'COMMENTAIRE_AJOUT', entity_type + ':' + entity_id)
-  addAudit(req.user, entity_type, entity_id, '', 'commentaire', [
+  await addLog(req.user, 'COMMENTAIRE_AJOUT', entity_type + ':' + entity_id)
+  await addAudit(req.user, entity_type, entity_id, '', 'commentaire', [
     { champ: 'commentaire', ancien: '', nouveau: texte.trim().slice(0, 200) }
   ], 'Ajout commentaire')
 
@@ -4562,7 +4587,7 @@ app.post('/api/commentaires', requireAuth, (req, res) => {
       created_at: comment.created_at
     })
     // stocke aussi une notif persistante
-    const notifs = readData('notifications.json')
+    const notifs = await readData('notifications.json')
     notifs.push({
       id: nextId(notifs, 'NT'),
       user_id: m.id,
@@ -4573,16 +4598,16 @@ app.post('/api/commentaires', requireAuth, (req, res) => {
       lu: false,
       created_at: comment.created_at
     })
-    writeData('notifications.json', notifs)
+    await writeData('notifications.json', notifs)
   }
 
   res.json(comment)
 })
 
-app.put('/api/commentaires/:id', requireAuth, (req, res) => {
+app.put('/api/commentaires/:id', requireAuth, async (req, res) => {
   const { texte } = req.body || {}
   if (!texte || !texte.trim()) return res.status(400).json({ error: 'Texte requis' })
-  const all = readData('commentaires.json')
+  const all = await readData('commentaires.json')
   const idx = all.findIndex(c => c.id === req.params.id)
   if (idx < 0) return res.status(404).json({ error: 'Commentaire introuvable' })
   const c = all[idx]
@@ -4592,18 +4617,18 @@ app.put('/api/commentaires/:id', requireAuth, (req, res) => {
   const ancien = c.texte
   c.texte = texte.trim()
   c.edited_at = new Date().toISOString()
-  writeData('commentaires.json', all)
-  addAudit(req.user, c.entity_type, c.entity_id, '', 'commentaire_edit', [
+  await writeData('commentaires.json', all)
+  await addAudit(req.user, c.entity_type, c.entity_id, '', 'commentaire_edit', [
     { champ: 'commentaire', ancien: ancien.slice(0, 200), nouveau: texte.trim().slice(0, 200) }
   ], 'Edition commentaire')
   rtBroadcast('comment_edited', { entity_type: c.entity_type, entity_id: c.entity_id, comment: c })
   res.json(c)
 })
 
-app.delete('/api/commentaires/:id', requireAuth, (req, res) => {
+app.delete('/api/commentaires/:id', requireAuth, async (req, res) => {
   const { motif } = req.body || {}
   if (!motif || !motif.trim()) return res.status(400).json({ error: 'Motif obligatoire', need_motif: true })
-  const all = readData('commentaires.json')
+  const all = await readData('commentaires.json')
   const idx = all.findIndex(c => c.id === req.params.id)
   if (idx < 0) return res.status(404).json({ error: 'Commentaire introuvable' })
   const c = all[idx]
@@ -4611,16 +4636,16 @@ app.delete('/api/commentaires/:id', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Seul l\'auteur ou le directeur peut supprimer' })
   }
   all.splice(idx, 1)
-  writeData('commentaires.json', all)
-  addAudit(req.user, c.entity_type, c.entity_id, '', 'commentaire_suppression', [], motif)
+  await writeData('commentaires.json', all)
+  await addAudit(req.user, c.entity_type, c.entity_id, '', 'commentaire_suppression', [], motif)
   rtBroadcast('comment_deleted', { entity_type: c.entity_type, entity_id: c.entity_id, comment_id: c.id })
   res.json({ ok: true })
 })
 
-app.post('/api/commentaires/:id/reaction', requireAuth, (req, res) => {
+app.post('/api/commentaires/:id/reaction', requireAuth, async (req, res) => {
   const { emoji } = req.body || {}
   if (!emoji) return res.status(400).json({ error: 'emoji requis' })
-  const all = readData('commentaires.json')
+  const all = await readData('commentaires.json')
   const c = all.find(x => x.id === req.params.id)
   if (!c) return res.status(404).json({ error: 'Commentaire introuvable' })
   c.reactions = c.reactions || {}
@@ -4629,14 +4654,14 @@ app.post('/api/commentaires/:id/reaction', requireAuth, (req, res) => {
   if (i >= 0) c.reactions[emoji].splice(i, 1)
   else c.reactions[emoji].push(req.user.id)
   if (c.reactions[emoji].length === 0) delete c.reactions[emoji]
-  writeData('commentaires.json', all)
+  await writeData('commentaires.json', all)
   rtBroadcast('comment_edited', { entity_type: c.entity_type, entity_id: c.entity_id, comment: c })
   res.json(c)
 })
 
 // notifications persistees (mentions, etc.)
-app.get('/api/mes-notifications', requireAuth, (req, res) => {
-  const all = readData('notifications.json')
+app.get('/api/mes-notifications', requireAuth, async (req, res) => {
+  const all = await readData('notifications.json')
   const mine = all.filter(n => n.user_id === req.user.id)
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
   res.json({
@@ -4646,22 +4671,22 @@ app.get('/api/mes-notifications', requireAuth, (req, res) => {
   })
 })
 
-app.put('/api/mes-notifications/lire-tout', requireAuth, (req, res) => {
-  const all = readData('notifications.json')
+app.put('/api/mes-notifications/lire-tout', requireAuth, async (req, res) => {
+  const all = await readData('notifications.json')
   let n = 0
   for (const it of all) {
     if (it.user_id === req.user.id && !it.lu) { it.lu = true; n++ }
   }
-  writeData('notifications.json', all)
+  await writeData('notifications.json', all)
   res.json({ ok: true, marquees: n })
 })
 
-app.put('/api/mes-notifications/:id/lire', requireAuth, (req, res) => {
-  const all = readData('notifications.json')
+app.put('/api/mes-notifications/:id/lire', requireAuth, async (req, res) => {
+  const all = await readData('notifications.json')
   const n = all.find(x => x.id === req.params.id && x.user_id === req.user.id)
   if (!n) return res.status(404).json({ error: 'Notification introuvable' })
   n.lu = true
-  writeData('notifications.json', all)
+  await writeData('notifications.json', all)
   res.json(n)
 })
 
@@ -4772,12 +4797,12 @@ function detectPieceType(texteOuNomFichier) {
   return meilleur
 }
 
-app.get('/api/pieces/types', requireAuth, (req, res) => {
+app.get('/api/pieces/types', requireAuth, async (req, res) => {
   res.json(PIECE_TYPES)
 })
 
-app.get('/api/pieces/:dem_id', requireAuth, (req, res) => {
-  const all = readData('pieces.json')
+app.get('/api/pieces/:dem_id', requireAuth, async (req, res) => {
+  const all = await readData('pieces.json')
   const dem_pieces = all.filter(p => p.dem_id === req.params.dem_id)
     .sort((a, b) => (b.uploaded_at || '').localeCompare(a.uploaded_at || ''))
   // checklist des pieces obligatoires manquantes
@@ -4788,7 +4813,7 @@ app.get('/api/pieces/:dem_id', requireAuth, (req, res) => {
   res.json({ pieces: dem_pieces, manquantes, total: dem_pieces.length })
 })
 
-app.post('/api/pieces', requireAuth, (req, res) => {
+app.post('/api/pieces', requireAuth, async (req, res) => {
   const {
     dem_id,
     nom_fichier,
@@ -4802,7 +4827,7 @@ app.post('/api/pieces', requireAuth, (req, res) => {
   if (!dem_id) return res.status(400).json({ error: 'dem_id requis' })
   if (!nom_fichier) return res.status(400).json({ error: 'nom_fichier requis' })
 
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const dem = demandeurs.find(d => d.id === dem_id)
   if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
 
@@ -4811,7 +4836,7 @@ app.post('/api/pieces', requireAuth, (req, res) => {
   const detection = detectPieceType(sourceDetection)
   const type = type_force && PIECE_TYPES[type_force] ? type_force : detection.type
 
-  const all = readData('pieces.json')
+  const all = await readData('pieces.json')
   const piece = {
     id: nextId(all, 'PJ'),
     dem_id,
@@ -4836,10 +4861,10 @@ app.post('/api/pieces', requireAuth, (req, res) => {
     motif_refus: null
   }
   all.push(piece)
-  writeData('pieces.json', all)
+  await writeData('pieces.json', all)
 
-  addLog(req.user, 'PIECE_UPLOAD', dem_id + ' : ' + nom_fichier + ' (type: ' + type + ')')
-  addAudit(req.user, 'demandeur', dem_id, dem.nom, 'piece_ajout', [
+  await addLog(req.user, 'PIECE_UPLOAD', dem_id + ' : ' + nom_fichier + ' (type: ' + type + ')')
+  await addAudit(req.user, 'demandeur', dem_id, dem.nom, 'piece_ajout', [
     { champ: 'piece', ancien: '', nouveau: nom_fichier + ' (' + (PIECE_TYPES[type]?.libelle || type) + ')' }
   ], 'Upload piece justificative')
 
@@ -4847,61 +4872,61 @@ app.post('/api/pieces', requireAuth, (req, res) => {
   res.json(piece)
 })
 
-app.put('/api/pieces/:id/valider', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
-  const all = readData('pieces.json')
+app.put('/api/pieces/:id/valider', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
+  const all = await readData('pieces.json')
   const p = all.find(x => x.id === req.params.id)
   if (!p) return res.status(404).json({ error: 'Piece introuvable' })
   p.statut = 'validee'
   p.valide_par = req.user.nom
   p.valide_le = new Date().toISOString()
   p.motif_refus = null
-  writeData('pieces.json', all)
-  addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_validation', [
+  await writeData('pieces.json', all)
+  await addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_validation', [
     { champ: 'piece_' + p.type, ancien: 'a_valider', nouveau: 'validee' }
   ], 'Validation piece')
   rtBroadcast('piece_updated', { dem_id: p.dem_id, piece: { ...p, contenu_base64: undefined } })
   res.json(p)
 })
 
-app.put('/api/pieces/:id/refuser', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+app.put('/api/pieces/:id/refuser', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
   const { motif } = req.body || {}
   if (!motif || !motif.trim()) return res.status(400).json({ error: 'Motif obligatoire', need_motif: true })
-  const all = readData('pieces.json')
+  const all = await readData('pieces.json')
   const p = all.find(x => x.id === req.params.id)
   if (!p) return res.status(404).json({ error: 'Piece introuvable' })
   p.statut = 'refusee'
   p.valide_par = req.user.nom
   p.valide_le = new Date().toISOString()
   p.motif_refus = motif.trim()
-  writeData('pieces.json', all)
-  addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_refus', [
+  await writeData('pieces.json', all)
+  await addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_refus', [
     { champ: 'piece_' + p.type, ancien: 'a_valider', nouveau: 'refusee' }
   ], motif)
   rtBroadcast('piece_updated', { dem_id: p.dem_id, piece: { ...p, contenu_base64: undefined } })
   res.json(p)
 })
 
-app.put('/api/pieces/:id/reclassifier', requireAuth, (req, res) => {
+app.put('/api/pieces/:id/reclassifier', requireAuth, async (req, res) => {
   const { type } = req.body || {}
   if (!type || !PIECE_TYPES[type]) return res.status(400).json({ error: 'Type inconnu' })
-  const all = readData('pieces.json')
+  const all = await readData('pieces.json')
   const p = all.find(x => x.id === req.params.id)
   if (!p) return res.status(404).json({ error: 'Piece introuvable' })
   const ancien = p.type
   p.type = type
   p.type_force = true
-  writeData('pieces.json', all)
-  addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_reclassification', [
+  await writeData('pieces.json', all)
+  await addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_reclassification', [
     { champ: 'type', ancien, nouveau: type }
   ], 'Reclassification manuelle')
   rtBroadcast('piece_updated', { dem_id: p.dem_id, piece: { ...p, contenu_base64: undefined } })
   res.json(p)
 })
 
-app.delete('/api/pieces/:id', requireAuth, (req, res) => {
+app.delete('/api/pieces/:id', requireAuth, async (req, res) => {
   const { motif } = req.body || {}
   if (!motif || !motif.trim()) return res.status(400).json({ error: 'Motif obligatoire', need_motif: true })
-  const all = readData('pieces.json')
+  const all = await readData('pieces.json')
   const idx = all.findIndex(x => x.id === req.params.id)
   if (idx < 0) return res.status(404).json({ error: 'Piece introuvable' })
   const p = all[idx]
@@ -4909,14 +4934,14 @@ app.delete('/api/pieces/:id', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Seul l\'auteur ou le directeur peut supprimer' })
   }
   all.splice(idx, 1)
-  writeData('pieces.json', all)
-  addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_suppression', [], motif)
+  await writeData('pieces.json', all)
+  await addAudit(req.user, 'demandeur', p.dem_id, p.dem_nom, 'piece_suppression', [], motif)
   rtBroadcast('piece_deleted', { dem_id: p.dem_id, piece_id: p.id })
   res.json({ ok: true })
 })
 
-app.get('/api/pieces/:id/contenu', requireAuth, (req, res) => {
-  const all = readData('pieces.json')
+app.get('/api/pieces/:id/contenu', requireAuth, async (req, res) => {
+  const all = await readData('pieces.json')
   const p = all.find(x => x.id === req.params.id)
   if (!p) return res.status(404).json({ error: 'Piece introuvable' })
   res.json({
@@ -4942,13 +4967,13 @@ const WORKFLOW_ETAPES = [
   { id: 'archive',      libelle: 'Archive',         couleur: '#94a3b8', ordre: 8, description: 'Dossier cloture' }
 ]
 
-app.get('/api/workflow/etapes', requireAuth, (req, res) => {
+app.get('/api/workflow/etapes', requireAuth, async (req, res) => {
   res.json(WORKFLOW_ETAPES)
 })
 
-app.get('/api/workflow/kanban', requireAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const pieces = readData('pieces.json')
+app.get('/api/workflow/kanban', requireAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
+  const pieces = await readData('pieces.json')
   const byEtape = {}
   for (const e of WORKFLOW_ETAPES) byEtape[e.id] = []
   for (const d of demandeurs) {
@@ -4979,13 +5004,13 @@ app.get('/api/workflow/kanban', requireAuth, (req, res) => {
   })
 })
 
-app.put('/api/workflow/deplacer/:dem_id', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
+app.put('/api/workflow/deplacer/:dem_id', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
   const { etape, motif } = req.body || {}
   if (!etape) return res.status(400).json({ error: 'etape requise' })
   const etapeObj = WORKFLOW_ETAPES.find(e => e.id === etape)
   if (!etapeObj) return res.status(400).json({ error: 'Etape inconnue' })
 
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const dem = demandeurs.find(d => d.id === req.params.dem_id)
   if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
 
@@ -4995,10 +5020,10 @@ app.put('/api/workflow/deplacer/:dem_id', requireAuth, requireRole('agent', 'dir
   dem.workflow_etape = etape
   dem.workflow_etape_at = new Date().toISOString()
   dem.workflow_etape_par = req.user.nom
-  writeData('demandeurs.json', demandeurs)
+  await writeData('demandeurs.json', demandeurs)
 
-  addLog(req.user, 'WORKFLOW_ETAPE', dem.id + ' : ' + ancienne + ' -> ' + etape)
-  addAudit(req.user, 'demandeur', dem.id, dem.nom, 'workflow', [
+  await addLog(req.user, 'WORKFLOW_ETAPE', dem.id + ' : ' + ancienne + ' -> ' + etape)
+  await addAudit(req.user, 'demandeur', dem.id, dem.nom, 'workflow', [
     { champ: 'etape', ancien: ancienne, nouveau: etape }
   ], motif || 'Deplacement kanban')
 
@@ -5017,8 +5042,8 @@ app.put('/api/workflow/deplacer/:dem_id', requireAuth, requireRole('agent', 'dir
 // MESSAGERIE INTERNE (agent - candidat - elu) par dossier
 // ============================================================
 
-app.get('/api/messages/:dem_id', requireAuth, (req, res) => {
-  const all = readData('messages.json')
+app.get('/api/messages/:dem_id', requireAuth, async (req, res) => {
+  const all = await readData('messages.json')
   const msgs = all.filter(m => m.dem_id === req.params.dem_id)
     .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
   // marque comme lu pour l'utilisateur courant
@@ -5030,20 +5055,20 @@ app.get('/api/messages/:dem_id', requireAuth, (req, res) => {
       modifie = true
     }
   }
-  if (modifie) writeData('messages.json', all)
+  if (modifie) await writeData('messages.json', all)
   res.json(msgs)
 })
 
-app.post('/api/messages', requireAuth, (req, res) => {
+app.post('/api/messages', requireAuth, async (req, res) => {
   const { dem_id, texte, destinataires, canal } = req.body || {}
   if (!dem_id) return res.status(400).json({ error: 'dem_id requis' })
   if (!texte || !texte.trim()) return res.status(400).json({ error: 'texte requis' })
 
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
   const dem = demandeurs.find(d => d.id === dem_id)
   if (!dem) return res.status(404).json({ error: 'Demandeur introuvable' })
 
-  const all = readData('messages.json')
+  const all = await readData('messages.json')
   const message = {
     id: nextId(all, 'MS'),
     dem_id,
@@ -5063,7 +5088,7 @@ app.post('/api/messages', requireAuth, (req, res) => {
     }
   }
   all.push(message)
-  writeData('messages.json', all)
+  await writeData('messages.json', all)
 
   // broadcast pour MAJ temps reel de la conversation
   rtBroadcast('message_sent', { dem_id, message })
@@ -5073,27 +5098,27 @@ app.post('/api/messages', requireAuth, (req, res) => {
     rtBroadcastToUser(uid, 'message_recu', { dem_id, from: req.user.nom, extrait: texte.slice(0, 140) })
   }
 
-  addLog(req.user, 'MESSAGE_INTERNE', dem_id + ' : ' + message.destinataires.length + ' destinataire(s)')
+  await addLog(req.user, 'MESSAGE_INTERNE', dem_id + ' : ' + message.destinataires.length + ' destinataire(s)')
 
   // si canal = telegram et qu'on a un chat_id du candidat, on envoie
   if (canal === 'telegram') {
-    const chat = tgGetChatId('demandeur', dem_id)
+    const chat = await tgGetChatId('demandeur', dem_id)
     if (chat) {
       tgSend(chat, '<b>Message de ' + req.user.nom + '</b>\n\n' + texte).catch(() => {})
       message.tracking.livre = new Date().toISOString()
-      writeData('messages.json', all)
+      await writeData('messages.json', all)
     } else {
       message.tracking.erreur = 'Chat Telegram non enregistre'
-      writeData('messages.json', all)
+      await writeData('messages.json', all)
     }
   }
 
   res.json(message)
 })
 
-app.get('/api/mes-conversations', requireAuth, (req, res) => {
-  const all = readData('messages.json')
-  const demandeurs = readData('demandeurs.json')
+app.get('/api/mes-conversations', requireAuth, async (req, res) => {
+  const all = await readData('messages.json')
+  const demandeurs = await readData('demandeurs.json')
   // mine = conversations ou je suis expediteur OU destinataire
   const mine = all.filter(m =>
     m.from_user_id === req.user.id ||
@@ -5138,12 +5163,12 @@ const RELANCE_REGLES = [
   { id: 'post_cal_7', libelle: 'Post-CAL J+7 (sans signature)', delai_jours: 7, type: 'post_cal', titre: 'Attribution sans signature' }
 ]
 
-app.get('/api/relances/regles', requireAuth, (req, res) => {
+app.get('/api/relances/regles', requireAuth, async (req, res) => {
   res.json(RELANCE_REGLES)
 })
 
-app.get('/api/relances', requireAuth, (req, res) => {
-  const all = readData('relances.json')
+app.get('/api/relances', requireAuth, async (req, res) => {
+  const all = await readData('relances.json')
   res.json(all.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')))
 })
 
@@ -5151,11 +5176,11 @@ app.get('/api/relances', requireAuth, (req, res) => {
  * Calcule les relances a faire MAINTENANT en scannant les demandeurs.
  * Ne persiste QUE les nouvelles relances.
  */
-app.post('/api/relances/analyser', requireAuth, requireRole('agent', 'directeur'), (req, res) => {
-  const demandeurs = readData('demandeurs.json')
-  const pieces = readData('pieces.json')
-  const messages = readData('messages.json')
-  const relances = readData('relances.json')
+app.post('/api/relances/analyser', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
+  const pieces = await readData('pieces.json')
+  const messages = await readData('messages.json')
+  const relances = await readData('relances.json')
   const nouvelles = []
   const now = Date.now()
   const joursMs = 24 * 3600 * 1000
@@ -5259,22 +5284,22 @@ app.post('/api/relances/analyser', requireAuth, requireRole('agent', 'directeur'
 
   if (nouvelles.length > 0) {
     const all = [...relances, ...nouvelles]
-    writeData('relances.json', all)
-    addLog(req.user, 'RELANCES_ANALYSE', nouvelles.length + ' nouvelles')
+    await writeData('relances.json', all)
+    await addLog(req.user, 'RELANCES_ANALYSE', nouvelles.length + ' nouvelles')
     rtBroadcast('relances_generees', { nb: nouvelles.length })
   }
 
   res.json({
     ok: true,
     nouvelles: nouvelles.length,
-    total: readData('relances.json').filter(r => !r.traitee).length,
+    total: (await readData('relances.json')).filter(r => !r.traitee).length,
     detail: nouvelles
   })
 })
 
-app.put('/api/relances/:id/traiter', requireAuth, (req, res) => {
+app.put('/api/relances/:id/traiter', requireAuth, async (req, res) => {
   const { action, commentaire } = req.body || {}
-  const all = readData('relances.json')
+  const all = await readData('relances.json')
   const r = all.find(x => x.id === req.params.id)
   if (!r) return res.status(404).json({ error: 'Relance introuvable' })
   r.traitee = true
@@ -5282,8 +5307,8 @@ app.put('/api/relances/:id/traiter', requireAuth, (req, res) => {
   r.traitee_le = new Date().toISOString()
   r.action = action || 'fait'
   r.commentaire = commentaire || ''
-  writeData('relances.json', all)
-  addAudit(req.user, 'demandeur', r.dem_id, r.dem_nom, 'relance_traitee', [], r.titre + ' / ' + (action || 'fait'))
+  await writeData('relances.json', all)
+  await addAudit(req.user, 'demandeur', r.dem_id, r.dem_nom, 'relance_traitee', [], r.titre + ' / ' + (action || 'fait'))
   res.json(r)
 })
 
@@ -5305,14 +5330,14 @@ function hashDecision(dec) {
   return createHash('sha256').update(sorted, 'utf8').digest('hex')
 }
 
-app.post('/api/cal/pv/:decision_id/signer', requireAuth, requireRole('directeur'), (req, res) => {
+app.post('/api/cal/pv/:decision_id/signer', requireAuth, requireRole('directeur'), async (req, res) => {
   const { pin } = req.body || {}
   if (!pin || typeof pin !== 'string' || pin.length < 4) {
     return res.status(400).json({ error: 'PIN requis (4 chiffres minimum)' })
   }
 
   // Recuperer le user complet (avec pin) - requireAuth ne renvoie pas le pin
-  const users = readData('users.json')
+  const users = await readData('users.json')
   const user = users.find(u => u.id === req.user.id)
   if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' })
 
@@ -5324,11 +5349,11 @@ app.post('/api/cal/pv/:decision_id/signer', requireAuth, requireRole('directeur'
     })
   }
   if (pin !== expectedPin) {
-    addLog(req.user, 'PV_SIGNATURE_PIN_KO', 'decision: ' + req.params.decision_id)
+    await addLog(req.user, 'PV_SIGNATURE_PIN_KO', 'decision: ' + req.params.decision_id)
     return res.status(401).json({ error: 'PIN incorrect' })
   }
 
-  const decisions = readData('decisions_cal.json')
+  const decisions = await readData('decisions_cal.json')
   const idx = decisions.findIndex(d => d.id === req.params.decision_id)
   if (idx === -1) return res.status(404).json({ error: 'Decision introuvable' })
 
@@ -5354,10 +5379,10 @@ app.post('/api/cal/pv/:decision_id/signer', requireAuth, requireRole('directeur'
     pin_verified: true
   }
   decisions[idx] = dec
-  writeData('decisions_cal.json', decisions)
+  await writeData('decisions_cal.json', decisions)
 
-  addLog(req.user, 'PV_SIGNATURE', 'decision: ' + dec.id + ' - hash: ' + sig.substring(0, 12))
-  addAudit(req.user, 'decision_cal', dec.id, dec.nom_commission || dec.id, 'signature', [
+  await addLog(req.user, 'PV_SIGNATURE', 'decision: ' + dec.id + ' - hash: ' + sig.substring(0, 12))
+  await addAudit(req.user, 'decision_cal', dec.id, dec.nom_commission || dec.id, 'signature', [
     { champ: 'signature', label: 'Signature electronique', avant: 'non signe', apres: 'signe par ' + req.user.prenom + ' ' + req.user.nom }
   ], 'Signature electronique du PV CAL')
 
@@ -5367,8 +5392,8 @@ app.post('/api/cal/pv/:decision_id/signer', requireAuth, requireRole('directeur'
 /**
  * Verification d'integrite : recalcule le hash et compare.
  */
-app.get('/api/cal/pv/:decision_id/verifier', requireAuth, (req, res) => {
-  const decisions = readData('decisions_cal.json')
+app.get('/api/cal/pv/:decision_id/verifier', requireAuth, async (req, res) => {
+  const decisions = await readData('decisions_cal.json')
   const dec = decisions.find(d => d.id === req.params.decision_id)
   if (!dec) return res.status(404).json({ error: 'Decision introuvable' })
   if (!dec.signature || !dec.signature.signed) {
@@ -5388,12 +5413,12 @@ app.get('/api/cal/pv/:decision_id/verifier', requireAuth, (req, res) => {
 /**
  * Definir / changer son PIN (directeur uniquement).
  */
-app.post('/api/auth/set-pin', requireAuth, requireRole('directeur'), (req, res) => {
+app.post('/api/auth/set-pin', requireAuth, requireRole('directeur'), async (req, res) => {
   const { pin, password } = req.body || {}
   if (!pin || !/^\d{4,8}$/.test(pin)) {
     return res.status(400).json({ error: 'PIN invalide (4 a 8 chiffres)' })
   }
-  const users = readData('users.json')
+  const users = await readData('users.json')
   const idx = users.findIndex(u => u.id === req.user.id)
   if (idx === -1) return res.status(404).json({ error: 'Utilisateur introuvable' })
   // Confirmation par mot de passe
@@ -5401,8 +5426,8 @@ app.post('/api/auth/set-pin', requireAuth, requireRole('directeur'), (req, res) 
     return res.status(401).json({ error: 'Mot de passe incorrect' })
   }
   users[idx].pin = pin
-  writeData('users.json', users)
-  addLog(req.user, 'SET_PIN', 'PIN directeur mis a jour')
+  await writeData('users.json', users)
+  await addLog(req.user, 'SET_PIN', 'PIN directeur mis a jour')
   res.json({ ok: true })
 })
 
@@ -5410,14 +5435,14 @@ app.post('/api/auth/set-pin', requireAuth, requireRole('directeur'), (req, res) 
 // PV CAL - generation HTML imprimable (type PDF)
 // ============================================================
 
-app.get('/api/cal/pv/:decision_id', requireAuth, (req, res) => {
-  const decisions = readData('decisions_cal.json')
+app.get('/api/cal/pv/:decision_id', requireAuth, async (req, res) => {
+  const decisions = await readData('decisions_cal.json')
   const dec = decisions.find(d => d.id === req.params.decision_id)
   if (!dec) return res.status(404).json({ error: 'Decision introuvable' })
 
-  const demandeurs = readData('demandeurs.json')
-  const logements = readData('logements.json')
-  const elus = readData('referentiels.json') // pas exact, selon le schema
+  const demandeurs = await readData('demandeurs.json')
+  const logements = await readData('logements.json')
+  const elus = await readData('referentiels.json') // pas exact, selon le schema
   const logement = logements.find(l => l.id === dec.logement_id) || {}
   const candidats = (dec.candidats || []).map(c => {
     const d = demandeurs.find(x => x.id === c.dem_id) || {}
@@ -5581,9 +5606,9 @@ function calculerDelaiMoyen(demandeurs, critere) {
   }
 }
 
-app.post('/api/ia/predict-delai', requireAuth, (req, res) => {
+app.post('/api/ia/predict-delai', requireAuth, async (req, res) => {
   const { typologie, composition, dalo, score, prioritaire } = req.body || {}
-  const demandeurs = readData('demandeurs.json')
+  const demandeurs = await readData('demandeurs.json')
 
   // 1. meme typologie + DALO
   const niv1 = calculerDelaiMoyen(demandeurs, d =>
@@ -5647,8 +5672,8 @@ app.post('/api/ia/predict-delai', requireAuth, (req, res) => {
   })
 })
 
-app.get('/api/ia/stats-globales', requireAuth, (req, res) => {
-  const demandeurs = readData('demandeurs.json')
+app.get('/api/ia/stats-globales', requireAuth, async (req, res) => {
+  const demandeurs = await readData('demandeurs.json')
   const parTypo = {}
   for (const d of demandeurs) {
     if (d.archive) continue
@@ -5785,13 +5810,13 @@ const EXPORT_COLUMNS = {
   ]
 }
 
-app.get('/api/export/:entity', requireAuth, requireRole('directeur', 'agent'), (req, res) => {
+app.get('/api/export/:entity', requireAuth, requireRole('directeur', 'agent'), async (req, res) => {
   const entity = req.params.entity
   let rows = []
 
   try {
     if (entity === 'demandeurs') {
-      rows = readData('demandeurs.json')
+      rows = await readData('demandeurs.json')
       const { statut, quartier, dalo, search } = req.query
       if (statut) rows = rows.filter(x => x.statut === statut)
       else rows = rows.filter(x => !x.statut || x.statut !== 'archive')
@@ -5802,7 +5827,7 @@ app.get('/api/export/:entity', requireAuth, requireRole('directeur', 'agent'), (
         rows = rows.filter(x => (x.nom + ' ' + x.prenom + ' ' + (x.nud || '')).toLowerCase().includes(q))
       }
     } else if (entity === 'audiences') {
-      rows = readData('audiences.json')
+      rows = await readData('audiences.json')
       const { elu_id, dem_id, statut } = req.query
       if (elu_id) rows = rows.filter(x => x.elu_id === elu_id)
       if (dem_id) rows = rows.filter(x => x.dem_id === dem_id)
@@ -5812,7 +5837,7 @@ app.get('/api/export/:entity', requireAuth, requireRole('directeur', 'agent'), (
         rows = rows.filter(x => x.elu_id === req.user.elu_id)
       }
     } else if (entity === 'decisions' || entity === 'decisions-cal') {
-      const decs = readData('decisions_cal.json')
+      const decs = await readData('decisions_cal.json')
       // Une ligne par candidat de chaque decision
       rows = decs.flatMap(d => (d.candidats || []).map(c => ({
         id_cal: d.id,
@@ -5825,9 +5850,9 @@ app.get('/api/export/:entity', requireAuth, requireRole('directeur', 'agent'), (
         agent_nom: d.agent_nom || ''
       })))
     } else if (entity === 'logements') {
-      rows = readData('logements.json')
+      rows = await readData('logements.json')
     } else if (entity === 'elus') {
-      const ref = readObj('referentiels.json', { elus: [] })
+      const ref = await readObj('referentiels.json', { elus: [] })
       rows = (ref.elus || []).filter(e => e.actif !== false)
     } else {
       return res.status(400).json({ error: 'Entite inconnue : ' + entity })
@@ -5841,7 +5866,7 @@ app.get('/api/export/:entity', requireAuth, requireRole('directeur', 'agent'), (
   const today = new Date().toISOString().split('T')[0]
   const filename = 'logivia_' + entity + '_' + today + '.csv'
 
-  addLog(req.user, 'EXPORT_' + entity.toUpperCase(), rows.length + ' lignes')
+  await addLog(req.user, 'EXPORT_' + entity.toUpperCase(), rows.length + ' lignes')
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8')
   res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"')
@@ -5853,7 +5878,7 @@ app.get('/api/export/:entity', requireAuth, requireRole('directeur', 'agent'), (
 // ============================================================
 
 if (existsSync(join(DIST, 'index.html'))) {
-  app.get('*', (req, res) => {
+  app.get('*', async (req, res) => {
     if (!req.path.startsWith('/api')) {
       res.sendFile(join(DIST, 'index.html'))
     }
@@ -5882,7 +5907,7 @@ function parseDateIso(s) {
   return isNaN(d.getTime()) ? null : d.getTime()
 }
 
-function purgerRetention() {
+async function purgerRetention() {
   const rapport = {
     date: new Date().toISOString(),
     audit_supprimes: 0,
@@ -5896,21 +5921,21 @@ function purgerRetention() {
 
   try {
     // 1. Audit > 5 ans
-    const audit = readData('audit.json')
+    const audit = await readData('audit.json')
     const cutoffAudit = daysAgo(RETENTION.AUDIT_ANS * 365)
     const auditKeep = audit.filter(a => (parseDateIso(a.date) || Date.now()) > cutoffAudit)
     rapport.audit_supprimes = audit.length - auditKeep.length
-    if (rapport.audit_supprimes > 0) writeData('audit.json', auditKeep)
+    if (rapport.audit_supprimes > 0) await writeData('audit.json', auditKeep)
 
     // 2. Logs > 12 mois
-    const logs = readData('logs.json')
+    const logs = await readData('logs.json')
     const cutoffLogs = daysAgo(RETENTION.LOGS_MOIS * 30)
     const logsKeep = logs.filter(l => (parseDateIso(l.date) || Date.now()) > cutoffLogs)
     rapport.logs_supprimes = logs.length - logsKeep.length
-    if (rapport.logs_supprimes > 0) writeData('logs.json', logsKeep)
+    if (rapport.logs_supprimes > 0) await writeData('logs.json', logsKeep)
 
     // 3. Anonymisation des demandes attribuees > 5 ans
-    const demandeurs = readData('demandeurs.json')
+    const demandeurs = await readData('demandeurs.json')
     const cutoffAttrib = daysAgo(RETENTION.DEMANDES_ATTRIBUEES_ANS * 365)
     let changedDem = false
     demandeurs.forEach((d, i) => {
@@ -5941,10 +5966,10 @@ function purgerRetention() {
         }
       }
     })
-    if (changedDem) writeData('demandeurs.json', demandeurs)
+    if (changedDem) await writeData('demandeurs.json', demandeurs)
 
     // 4. Demandes RGPD traitees > 3 ans
-    const rgpd = readData('rgpd_demandes.json')
+    const rgpd = await readData('rgpd_demandes.json')
     const cutoffRgpd = daysAgo(RETENTION.RGPD_DEMANDES_ANS * 365)
     const rgpdKeep = rgpd.filter(r => {
       if (r.statut === 'recue') return true
@@ -5952,10 +5977,10 @@ function purgerRetention() {
       return date > cutoffRgpd
     })
     rapport.rgpd_demandes_supprimees = rgpd.length - rgpdKeep.length
-    if (rapport.rgpd_demandes_supprimees > 0) writeData('rgpd_demandes.json', rgpdKeep)
+    if (rapport.rgpd_demandes_supprimees > 0) await writeData('rgpd_demandes.json', rgpdKeep)
 
     // 5. Pieces d une demande attribuee ou radiee depuis > 12 mois
-    const pieces = readData('pieces_justificatives.json')
+    const pieces = await readData('pieces_justificatives.json')
     const cutoffPieces = daysAgo(RETENTION.PIECES_AP_TRAITEMENT_MOIS * 30)
     const piecesKeep = []
     for (const p of pieces) {
@@ -5975,10 +6000,10 @@ function purgerRetention() {
       }
       piecesKeep.push(p)
     }
-    if (rapport.pieces_supprimees > 0) writeData('pieces_justificatives.json', piecesKeep)
+    if (rapport.pieces_supprimees > 0) await writeData('pieces_justificatives.json', piecesKeep)
 
     // 6. Comptes inactifs
-    const users = readData('users.json')
+    const users = await readData('users.json')
     const cutoffDesactiv = daysAgo(RETENTION.COMPTE_INACTIF_DESACTIVATION_MOIS * 30)
     const cutoffSupp = daysAgo(RETENTION.COMPTE_INACTIF_SUPPRESSION_MOIS * 30)
     const usersKeep = []
@@ -5999,13 +6024,13 @@ function purgerRetention() {
       }
       usersKeep.push(u)
     }
-    if (changedUsers) writeData('users.json', usersKeep)
+    if (changedUsers) await writeData('users.json', usersKeep)
 
-    // 7. Nettoyage sessions portail expirees (deja fait ailleurs, mais redondance sans cout)
-    try { nettoyerSessionsExpirees() } catch (e) {}
+    // 7. Nettoyage sessions/state expirees (best-effort, non bloquant)
+    try { await ephCleanup() } catch (e) {}
 
     // 8. Consigner le rapport dans audit
-    try { addLog(null, 'RGPD_PURGE', JSON.stringify(rapport)) } catch (e) {}
+    try { await addLog(null, 'RGPD_PURGE', JSON.stringify(rapport)) } catch (e) {}
 
     console.log('[RGPD-purge] ' + JSON.stringify(rapport))
   } catch (err) {
@@ -6016,25 +6041,29 @@ function purgerRetention() {
 }
 
 // Endpoint admin pour declencher une purge manuelle
-app.post('/api/rgpd/purger', requireAuth, requireRole('directeur'), (req, res) => {
-  const rapport = purgerRetention()
+app.post('/api/rgpd/purger', requireAuth, requireRole('directeur'), async (req, res) => {
+  const rapport = await purgerRetention()
   res.json(rapport)
 })
 
 // Endpoint cron externe (protege par CRON_SECRET)
-app.post('/api/rgpd/cron-purge', (req, res) => {
+app.post('/api/rgpd/cron-purge', async (req, res) => {
   const secret = req.headers['x-cron-secret'] || (req.query && req.query.secret)
   if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
     return res.status(401).json({ error: 'cron secret invalide' })
   }
-  const rapport = purgerRetention()
+  const rapport = await purgerRetention()
   res.json(rapport)
 })
 
-// Demarrage d une purge automatique quotidienne en interne (leger, ok pour 1 seul process)
-setInterval(purgerRetention, 24 * 60 * 60 * 1000).unref?.()
-// Premier passage 5 min apres le demarrage (evite de bloquer le boot)
-setTimeout(purgerRetention, 5 * 60 * 1000).unref?.()
+// Demarrage d une purge automatique quotidienne en interne. NOTE : sur Vercel
+// (serverless), ces timers ne survivent pas entre invocations — la purge
+// reelle doit etre declenchee par un Cron Job Vercel qui appelle
+// /api/rgpd/cron-purge. Conserve ici pour le mode "npm run server" classique.
+if (!process.env.VERCEL) {
+  setInterval(() => { purgerRetention().catch(e => console.error('[purge]', e.message)) }, 24 * 60 * 60 * 1000).unref?.()
+  setTimeout(() => { purgerRetention().catch(e => console.error('[purge]', e.message)) }, 5 * 60 * 1000).unref?.()
+}
 
 // ============================================================
 // SAUVEGARDE BASE SQLITE (quotidien + endpoint manuel)
@@ -6043,9 +6072,9 @@ setTimeout(purgerRetention, 5 * 60 * 1000).unref?.()
 async function sauvegardeQuotidienne() {
   try {
     const info = await dbBackupNow()
-    const rot = dbRotateBackups(30) // garde 30 jours
-    console.log('[backup] ' + info.filename + ' (' + Math.round(info.size_bytes / 1024) + ' ko) — rotation : ' + rot.deleted + ' ancien(s) supprime(s)')
-    return { ok: true, backup: info, rotation: rot }
+    const deleted = await dbRotateBackups(30) // garde 30 jours
+    console.log('[backup] ' + info.filename + ' (' + Math.round(info.size_bytes / 1024) + ' ko) — rotation : ' + deleted + ' ancien(s) supprime(s)')
+    return { ok: true, backup: info, rotation: { deleted } }
   } catch (e) {
     console.error('[backup] erreur : ' + e.message)
     return { ok: false, error: e.message }
@@ -6060,32 +6089,36 @@ app.post('/api/admin/backup-now', requireAuth, requireRole('directeur'), async (
 })
 
 // Endpoint : lister les sauvegardes
-app.get('/api/admin/backups', requireAuth, requireRole('directeur'), (req, res) => {
+// NOTE : avec Supabase, la sauvegarde/restauration point-in-time est aussi
+// gérée nativement par la plateforme (voir Project Settings > Database >
+// Backups). Ce qui suit reste utile pour un export JSON ponctuel.
+app.get('/api/admin/backups', requireAuth, requireRole('directeur'), async (req, res) => {
   res.json({
-    db: dbStats(),
-    backups: dbListBackups(),
-    entries: dbListFiles()
+    db: await dbStats(),
+    backups: await dbListBackups(),
+    entries: await dbListFiles()
   })
 })
 
-// Endpoint : télécharger une sauvegarde spécifique
-app.get('/api/admin/backups/:filename', requireAuth, requireRole('directeur'), (req, res) => {
-  const safe = /^logivia-\d{4}-\d{2}-\d{2}\.db$/.test(req.params.filename)
+// Endpoint : télécharger une sauvegarde spécifique (export JSON, plus de .db)
+app.get('/api/admin/backups/:filename', requireAuth, requireRole('directeur'), async (req, res) => {
+  const safe = /^backup-\d{4}-\d{2}-\d{2}-\d+\.json$/.test(req.params.filename)
   if (!safe) return res.status(400).json({ error: 'nom de fichier invalide' })
-  const p = join(dbGetBackupDir(), req.params.filename)
-  if (!existsSync(p)) return res.status(404).json({ error: 'introuvable' })
-  res.setHeader('Content-Type', 'application/octet-stream')
+  const snapshot = await readObj('_backups/' + req.params.filename, null)
+  if (!snapshot) return res.status(404).json({ error: 'introuvable' })
+  res.setHeader('Content-Type', 'application/json')
   res.setHeader('Content-Disposition', 'attachment; filename="' + req.params.filename + '"')
-  res.send(readFileSync(p))
+  res.send(JSON.stringify(snapshot, null, 2))
 })
 
-// Endpoint : télécharger la base courante (chaude — à utiliser de préférence après un /backup-now)
+// Endpoint : générer et télécharger un export JSON complet immédiat
 app.get('/api/admin/db-download', requireAuth, requireRole('directeur'), async (req, res) => {
   try {
-    const info = await dbBackupNow() // snapshot atomique, pas de lecture "à chaud" risquée
-    res.setHeader('Content-Type', 'application/octet-stream')
+    const info = await dbBackupNow()
+    const snapshot = await readObj('_backups/' + info.filename, null)
+    res.setHeader('Content-Type', 'application/json')
     res.setHeader('Content-Disposition', 'attachment; filename="' + info.filename + '"')
-    res.send(readFileSync(info.path))
+    res.send(JSON.stringify(snapshot, null, 2))
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -6117,12 +6150,12 @@ app.post('/api/ai/chat', requireAuth, async (req, res) => {
     const ctx = {
       user: req.user,
       // aiAnswer utilise readArr(name) et readObj(name) sans extension .json
-      readArr: (name) => readData(name + '.json'),
-      readObj: (name) => readObj(name + '.json', {})
+      readArr: async (name) => await readData(name + '.json'),
+      readObj: async (name) => await readObj(name + '.json', {})
     }
 
     // 1. Rules-based (tres rapide, offline)
-    const local = aiAnswer(q, ctx)
+    const local = await aiAnswer(q, ctx)
 
     // 2. Si on n'a pas compris ET qu'on a une cle LLM, on tente Claude
     if (process.env.ANTHROPIC_API_KEY && local && local.reply && local.reply.startsWith("Je n'ai pas compris")) {
@@ -6160,23 +6193,34 @@ setInterval(() => { sauvegardeQuotidienne().catch(() => {}) }, 24 * 60 * 60 * 10
 
 // Bootstrap final : s'assurer que les referentiels critiques sont presents
 try {
-  ensureContingentsConfig()
+  await ensureContingentsConfig()
 } catch (e) {
   console.error('[bootstrap] ensureContingentsConfig : ' + e.message)
 }
 
 const PORT = process.env.PORT || 4000
-app.listen(PORT, () => {
-  console.log('\n╔══════════════════════════════════════════╗')
-  console.log('║  Logivia v3.1 · Ville de Saint-Denis     ║')
-  console.log('╚══════════════════════════════════════════╝')
-  console.log('  Port          : ' + PORT)
-  console.log('  Data          : ' + DATA + (process.env.DATA_DIR ? ' (volume persistant)' : ' (ephemere, dev)'))
-  const s = (() => { try { return dbStats() } catch (_) { return null } })()
-  console.log('  Base SQLite   : ' + (s ? s.path + ' (' + s.file_count + ' entrees, ' + Math.round(s.size_bytes / 1024) + ' ko)' : 'non initialisee — fallback JSON'))
-  console.log('  Backups       : ' + (s ? dbGetBackupDir() + ' (' + dbListBackups().length + ' sauvegarde(s))' : 'n/a'))
-  console.log('  Telegram      : ' + (process.env.BOT_TOKEN ? 'token via env' : 'token fallback code'))
-  console.log('  App URL       : ' + (process.env.APP_URL || '(APP_URL non definie - les liens Telegram utiliseront l\'URL par defaut)'))
-  console.log('  Build prod    : ' + existsSync(join(DIST, 'index.html')))
-  console.log('  Temps reel SSE: actif sur /api/events\n')
-})
+
+// Sur Vercel, le fichier api/index.js importe `app` et l'utilise comme
+// handler serverless : on ne doit PAS appeler app.listen() dans ce cas
+// (pas de port à écouter, Vercel gère le cycle de vie de la requête).
+if (!process.env.VERCEL) {
+  app.listen(PORT, async () => {
+    console.log('\n╔══════════════════════════════════════════╗')
+    console.log('║  Logivia v3.1 · Ville de Saint-Denis     ║')
+    console.log('╚══════════════════════════════════════════╝')
+    console.log('  Port          : ' + PORT)
+    console.log('  Data          : ' + DATA + (process.env.DATA_DIR ? ' (volume persistant)' : ' (ephemere, dev)'))
+    const s = await (async () => { try { return await dbStats() } catch (_) { return null } })()
+    console.log('  Persistance   : ' + (s ? s.path + ' (' + s.file_count + ' entrees, ' + Math.round(s.size_bytes / 1024) + ' ko)' : 'non initialisee — fallback JSON'))
+    const backups = s ? await dbListBackups() : []
+    console.log('  Backups       : ' + (s ? dbGetBackupDir() + ' (' + backups.length + ' sauvegarde(s))' : 'n/a'))
+    console.log('  Telegram      : ' + (process.env.BOT_TOKEN ? 'configure (BOT_TOKEN)' : 'NON configure - definir BOT_TOKEN'))
+    console.log('  App URL       : ' + (process.env.APP_URL || '(APP_URL non definie - les liens Telegram utiliseront l\'URL par defaut)'))
+    console.log('  Build prod    : ' + existsSync(join(DIST, 'index.html')))
+    console.log('  Temps reel SSE: actif sur /api/events (limite en serverless, voir /api/events)\n')
+  })
+}
+
+// Export pour Vercel (voir api/index.js) : une app Express est directement
+// utilisable comme handler async (req, res) => {}.
+export default app

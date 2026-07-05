@@ -1,25 +1,19 @@
 /**
- * CAL Smart - Telegram Bot
+ * CAL Smart / Logivia - Telegram Bot
  * Notifications élus et candidats via Telegram
- * Token : 8365732100:AAHhqqnayRjBSQMIpyy3YHxZh6fYnMPexI0
+ * Token : fourni via la variable d'environnement BOT_TOKEN (jamais en dur ici)
  */
 
-import { readFileSync, writeFileSync } from 'fs'
-import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { readData as dbReadData, readObj as dbReadObj, writeData as dbWriteData } from './db.js'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-// DATA = volume persistant (Railway) si DATA_DIR defini, sinon server/data
-const DATA = process.env.DATA_DIR || join(__dirname, 'data')
-
-const BOT_TOKEN = process.env.BOT_TOKEN || '8365732100:AAHhqqnayRjBSQMIpyy3YHxZh6fYnMPexI0'
+const BOT_TOKEN = process.env.BOT_TOKEN || ''
 const BOT_USERNAME = process.env.BOT_USERNAME || 'CALSmartSaintDenis_bot'
 const API_URL = `https://api.telegram.org/bot${BOT_TOKEN}`
 
 // ─── LIENS DE CONNEXION PERSONNELS ───────────────────────────────────────────
 // Format: https://t.me/<bot>?start=elu_<id> ou dem_<id>
 // Quand l utilisateur clique le lien, Telegram ouvre le bot et envoie
-// automatiquement /start elu_<id>, ce qui declenche saveChatId() via webhook.
+// automatiquement /start elu_<id>, ce qui declenche await saveChatId() via webhook.
 
 export function genererLienElu(eluId) {
   return `https://t.me/${BOT_USERNAME}?start=elu_${eluId}`
@@ -30,12 +24,19 @@ export function genererLienCandidat(demId) {
 }
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
-
-function readData(file) {
-  return JSON.parse(readFileSync(join(DATA, file), 'utf8'))
+// Délègue à la même couche Supabase que le reste de l'application (server/db.js)
+// au lieu de fichiers JSON locaux. Corrige au passage une incohérence de
+// l'ancienne version : ce module lisait des fichiers .json à part, jamais mis
+// à jour après le passage à SQLite/Supabase (référentiels/demandeurs
+// potentiellement obsolètes dans les notifications Telegram).
+async function readData(file) {
+  return await dbReadData(file)
 }
-function writeData(file, data) {
-  writeFileSync(join(DATA, file), JSON.stringify(data, null, 2), 'utf8')
+async function readObj(file, fallback) {
+  return await dbReadObj(file, fallback)
+}
+async function writeData(file, data) {
+  return await dbWriteData(file, data)
 }
 
 // ─── ENVOI MESSAGE ───────────────────────────────────────────────────────────
@@ -186,28 +187,22 @@ Vous serez averti-e en cas de :
 // ─── GESTION DES CHAT IDS ─────────────────────────────────────────────────────
 // Stocke les associations user/elu -> chat_id Telegram
 
-export function saveChatId(type, id, chatId) {
+export async function saveChatId(type, id, chatId) {
   // type = 'elu' | 'demandeur' | 'user'
-  let tg = {}
-  try { tg = JSON.parse(readFileSync(join(DATA, 'telegram_chats.json'), 'utf8')) }
-  catch(e) {}
+  const tg = await readObj('telegram_chats.json', {})
   if (!tg[type]) tg[type] = {}
   tg[type][id] = chatId
-  writeFileSync(join(DATA, 'telegram_chats.json'), JSON.stringify(tg, null, 2), 'utf8')
+  await writeData('telegram_chats.json', tg)
 }
 
-export function getChatId(type, id) {
-  try {
-    const tg = JSON.parse(readFileSync(join(DATA, 'telegram_chats.json'), 'utf8'))
-    return tg[type]?.[id] || null
-  } catch(e) { return null }
+export async function getChatId(type, id) {
+  const tg = await readObj('telegram_chats.json', {})
+  return tg[type]?.[id] || null
 }
 
-export function getAllChatIds(type) {
-  try {
-    const tg = JSON.parse(readFileSync(join(DATA, 'telegram_chats.json'), 'utf8'))
-    return tg[type] || {}
-  } catch(e) { return {} }
+export async function getAllChatIds(type) {
+  const tg = await readObj('telegram_chats.json', {})
+  return tg[type] || {}
 }
 
 // ─── WEBHOOK - ÉCOUTE LES MESSAGES ENTRANTS ──────────────────────────────────
@@ -233,20 +228,20 @@ export async function handleWebhook(body) {
       const [type, id] = token.split('_')
 
       if (type === 'elu') {
-        const ref = readData('referentiels.json')
+        const ref = await readData('referentiels.json')
         const elu = (ref.elus || []).find(e => e.id === id)
         if (elu) {
-          saveChatId('elu', id, chatId)
+          await saveChatId('elu', id, chatId)
           await sendMessage(chatId, MSG.bienvenue_elu(elu))
           return
         }
       }
 
       if (type === 'dem') {
-        const demandeurs = readData('demandeurs.json')
+        const demandeurs = await readData('demandeurs.json')
         const dem = demandeurs.find(d => d.id === id)
         if (dem) {
-          saveChatId('demandeur', id, chatId)
+          await saveChatId('demandeur', id, chatId)
           await sendMessage(chatId, MSG.bienvenue_candidat(dem))
           return
         }
@@ -273,17 +268,17 @@ export async function handleWebhook(body) {
 
   if (text === '/statut') {
     // Chercher si ce chatId est connu
-    const elus = getAllChatIds('elu')
-    const dems = getAllChatIds('demandeur')
+    const elus = await getAllChatIds('elu')
+    const dems = await getAllChatIds('demandeur')
     const eluId = Object.entries(elus).find(([,cid])=>cid===chatId)?.[0]
     const demId = Object.entries(dems).find(([,cid])=>cid===chatId)?.[0]
 
     if (eluId) {
-      const ref = readData('referentiels.json')
+      const ref = await readData('referentiels.json')
       const elu = (ref.elus||[]).find(e=>e.id===eluId)
       await sendMessage(chatId, `[ok] Connecté en tant qu'élu : <b>${elu?.nom || eluId}</b>`)
     } else if (demId) {
-      const dem = readData('demandeurs.json').find(d=>d.id===demId)
+      const dem = (await readData('demandeurs.json')).find(d=>d.id===demId)
       await sendMessage(chatId, `[ok] Connecté en tant que demandeur : <b>${dem?.nom} ${dem?.prenom}</b>`)
     } else {
       await sendMessage(chatId, `[err] Non connecté. Utilisez le lien fourni par le service habitat.`)
@@ -299,14 +294,14 @@ export async function handleWebhook(body) {
 
 // Envoyer le digest hebdo à tous les élus connectés
 export async function envoyerDigestHebdo() {
-  const ref = readData('referentiels.json')
-  const demandeurs = readData('demandeurs.json')
-  const audiences = readData('audiences.json')
-  const logements = readData('logements.json')
+  const ref = await readData('referentiels.json')
+  const demandeurs = await readData('demandeurs.json')
+  const audiences = await readData('audiences.json')
+  const logements = await readData('logements.json')
   const elus = ref.elus || []
 
   for (const elu of elus) {
-    const chatId = getChatId('elu', elu.id)
+    const chatId = await getChatId('elu', elu.id)
     if (!chatId) continue
 
     // Stats pour cet élu
@@ -338,28 +333,28 @@ export async function envoyerDigestHebdo() {
 
 // Notifier un élu d'une attribution
 export async function notifierAttributionElu(eluId, dem, logement, audience, jours) {
-  const chatId = getChatId('elu', eluId)
+  const chatId = await getChatId('elu', eluId)
   if (!chatId) return false
   return sendMessage(chatId, MSG.attribution_audience(dem, logement, audience, jours))
 }
 
 // Notifier un élu d'une urgence
 export async function notifierUrgenceElu(eluId, dem, secteur, jours) {
-  const chatId = getChatId('elu', eluId)
+  const chatId = await getChatId('elu', eluId)
   if (!chatId) return false
   return sendMessage(chatId, MSG.urgence_territoire(dem, secteur, jours))
 }
 
 // Notifier un candidat d'une proposition
 export async function notifierPropositionCandidat(demId, dem, logement) {
-  const chatId = getChatId('demandeur', demId)
+  const chatId = await getChatId('demandeur', demId)
   if (!chatId) return false
   return sendMessage(chatId, MSG.proposition_logement(dem, logement))
 }
 
 // Notifier un candidat d'une décision CAL
 export async function notifierDecisionCAL(demId, dem, decision, logement) {
-  const chatId = getChatId('demandeur', demId)
+  const chatId = await getChatId('demandeur', demId)
   if (!chatId) return false
   return sendMessage(chatId, MSG.decision_cal(dem, decision, logement))
 }

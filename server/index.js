@@ -69,14 +69,22 @@ process.on('uncaughtException', (err) => {
   console.error('[uncaughtException]', err && err.stack ? err.stack : err)
 })
 
-// DATA_DIR : sur Railway, on monte un Volume sur /data ; en local, fallback ./server/data
+// DATA_DIR : sur Railway, on montait un Volume sur /data ; en local, fallback
+// ./server/data. Sur Vercel, le système de fichiers du projet est en LECTURE
+// SEULE (seul /tmp est inscriptible, et non persistant entre invocations) :
+// si DATA_DIR n'est pas défini explicitement, on utilise /tmp plutôt que le
+// dossier du repo pour ne jamais tenter d'écrire là où c'est interdit.
 const SEED_DATA = join(__dirname, 'data')
-const DATA = process.env.DATA_DIR || SEED_DATA
+const DATA = process.env.DATA_DIR || (process.env.VERCEL ? join('/tmp', 'logivia-data') : SEED_DATA)
 const DIST = join(__dirname, '../dist')
-const TMP = join(__dirname, '../tmp')
+const TMP = process.env.VERCEL ? join('/tmp', 'logivia-tmp') : join(__dirname, '../tmp')
 
-if (!existsSync(DATA)) mkdirSync(DATA, { recursive: true })
-if (!existsSync(TMP)) mkdirSync(TMP, { recursive: true })
+// Ces créations de dossiers sont désormais protégées : une erreur ici (ex.
+// filesystem en lecture seule si VERCEL n'était pas détecté, ou tout autre
+// souci d'environnement) ne doit JAMAIS faire planter tout le module au
+// chargement — ça ferait échouer TOUTES les routes, y compris /api/ping.
+try { if (!existsSync(DATA)) mkdirSync(DATA, { recursive: true }) } catch (e) { console.error('[boot] mkdir DATA impossible : ' + e.message) }
+try { if (!existsSync(TMP)) mkdirSync(TMP, { recursive: true }) } catch (e) { console.error('[boot] mkdir TMP impossible : ' + e.message) }
 
 /**
  * Sur premier boot Railway, le Volume monte est vide. On seed depuis le repo

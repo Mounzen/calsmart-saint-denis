@@ -103,10 +103,11 @@ function mapLogement(row) {
 function mapAudience(row) {
   return {
     date_audience: row['date'] || row['date_audience'] || '',
-    dem_nom: row['nom_demandeur'] || row['dem_nom'] || '',
-    dem_prenom: row['prenom_demandeur'] || row['dem_prenom'] || '',
+    dem_nom: row['nom_demandeur'] || row['dem_nom'] || row['nom'] || '',
+    dem_prenom: row['prenom_demandeur'] || row['dem_prenom'] || row['prenom'] || '',
     nud: row['nud'] || '',
     dem_id: row['dem_id'] || 'IMPORT',
+    elu_nom: row['elu'] || row['elu_nom'] || row['nom_elu'] || '',
     elu_secteur: row['elu_secteur'] || row['secteur'] || '',
     quartier_origine: row['quartier_origine'] || row['quartier'] || '',
     quartier_souhaite: row['quartier_souhaite'] || '',
@@ -183,7 +184,7 @@ export default function ImportPelehas({ onDone }) {
   const PREVIEW_COLS = {
     demandeurs: ['nom', 'prenom', 'nud', 'anc', 'compo', 'typ_v', 'rev'],
     logements: ['ref', 'bailleur', 'adresse', 'typ', 'loyer'],
-    audiences: ['date_audience', 'dem_nom', 'dem_prenom', 'elu_secteur', 'objet']
+    audiences: ['date_audience', 'dem_nom', 'dem_prenom', 'elu_nom', 'elu_secteur', 'objet']
   }
 
   return (

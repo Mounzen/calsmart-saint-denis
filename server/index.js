@@ -2346,9 +2346,11 @@ app.post('/api/import/audiences', requireAuth, requireRole('agent', 'directeur')
 
   const demandeurs = await readData('demandeurs.json')
   const audiences = await readData('audiences.json')
+  const referentiels = await readObj('referentiels.json', {})
+  const elus = Array.isArray(referentiels.elus) ? referentiels.elus : []
   const norm = s => (s || '').toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 
-  let imported = 0; let matched = 0; let unmatched = 0; let errors = 0
+  let imported = 0; let matched = 0; let unmatched = 0; let elus_matched = 0; let elus_unmatched = 0; let errors = 0
 
   for (const row of rows) {
     try {
@@ -2361,12 +2363,31 @@ app.post('/api/import/audiences', requireAuth, requireRole('agent', 'directeur')
             norm(d.nom) === norm(row.dem_nom) && norm(d.prenom) === norm(row.dem_prenom)
           )
         }
-        if (found) { dem_id = found.id; matched++ } else unmatched++
+        // Toujours attribuer un identifiant UNIQUE quand aucune correspondance
+        // n'est trouvée : réutiliser la même valeur "IMPORT" pour toutes les
+        // lignes créerait des collisions (plusieurs audiences distinctes
+        // rattachées au même faux "demandeur").
+        if (found) { dem_id = found.id; matched++ }
+        else { dem_id = 'IMPORT-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7); unmatched++ }
       }
+
+      // Correspondance de l'élu par nom (colonne "elu" du CSV Pelehas), avec
+      // le secteur en repli si le nom seul ne suffit pas à lever l'ambiguïté.
+      let elu_id = row.elu_id || ''
+      if (!elu_id && row.elu_nom) {
+        const candidats = elus.filter(e => norm(e.nom) === norm(row.elu_nom))
+        let found = candidats.length === 1 ? candidats[0]
+          : candidats.find(e => row.elu_secteur && norm(e.secteur) === norm(row.elu_secteur))
+        if (found) { elu_id = found.id; elus_matched++ } else elus_unmatched++
+      } else if (!elu_id) {
+        elus_unmatched++
+      }
+
       audiences.push({
         id: nextId(audiences, 'A'),
         ...row,
-        dem_id: dem_id || 'IMPORT-' + Date.now(),
+        dem_id,
+        elu_id,
         statut: row.statut || 'En attente proposition'
       })
       imported++
@@ -2374,7 +2395,7 @@ app.post('/api/import/audiences', requireAuth, requireRole('agent', 'directeur')
   }
 
   await writeData('audiences.json', audiences)
-  res.json({ imported, matched, unmatched, errors })
+  res.json({ imported, matched, unmatched, elus_matched, elus_unmatched, errors })
 })
 
 // ============================================================

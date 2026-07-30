@@ -1832,7 +1832,7 @@ function Matching({ initLog, addToCAL }) {
                       {x.dem.dalo && <Pill label="DALO" color={C.red} bg={C.redBg} />}
                       {x.dem.violences && <Pill label="VIF" color={C.red} bg={C.redBg} />}
                       {x.dem.sans_log && <Pill label="SDF" color={C.red} bg={C.redBg} />}
-                      {audFav && <Pill label="Audience fav." color={C.purple} bg={C.purpleBg} />}
+                      {audFav && <Pill label={x.res.audience_bonus > 0 ? 'Audience +' + x.res.audience_bonus : 'Audience fav.'} color={C.purple} bg={C.purpleBg} />}
                       {!x.dem.pieces && <Pill label="Incomplet" color={C.amber} bg={C.amberBg} />}
                     </div>
                   </div>
@@ -2049,11 +2049,15 @@ function ScoreDetailModal({ candidate, logement, onClose }) {
         <div style={{ marginBottom: 14, padding: 12, border: '1px solid ' + C.border, borderRadius: 8, background: '#FFF7E5' }}>
           <div style={{ fontFamily: Fh, fontWeight: 800, fontSize: 13, color: C.text, marginBottom: 8 }}>Historique (bonus / malus)</div>
           <div style={{ fontSize: 12, lineHeight: 1.7 }}>
-            {bm.map((b, i) => (
-              <div key={i} style={{ color: b.type === 'bonus' ? C.green : C.red, fontWeight: 600 }}>
-                {b.type === 'bonus' ? '▲' : '▼'} {b.msg}
-              </div>
-            ))}
+            {bm.map((b, i) => {
+              const col = b.type === 'bonus' ? (b.audience ? C.purple : C.green) : b.type === 'info' ? C.muted : C.red
+              const mark = b.type === 'bonus' ? '▲' : b.type === 'info' ? '•' : '▼'
+              return (
+                <div key={i} style={{ color: col, fontWeight: 600 }}>
+                  {mark} {b.msg}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}

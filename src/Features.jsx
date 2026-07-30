@@ -1130,6 +1130,90 @@ export function FicheEluPage({ elu_id, onBack }) {
 // REGLES DE SCORING (visible et editable)
 // ===========================================================
 
+// Carte de reglage du bonus "audience elu" (contingent communal).
+// Autonome : lit / ecrit /api/config/audience. Reglage reserve au directeur.
+function AudienceBonusReglage({ isDirecteur, toast }) {
+  const [cfg, setCfg] = useState(null)
+  const [draft, setDraft] = useState(null)
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  const load = () => fapi('/config/audience').then(c => { setCfg(c); setDraft({ ...c }) }).catch(() => {})
+  useEffect(() => { load() }, [])
+  if (!cfg) return null
+  const v = editing ? draft : cfg
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      const saved = await fapi('/config/audience', { method: 'PUT', body: draft })
+      setCfg(saved); setDraft({ ...saved }); setEditing(false)
+      toast && toast('Bonus audience mis a jour', 'success')
+    } catch (e) { toast && toast('Erreur : ' + e.message, 'error') }
+    finally { setSaving(false) }
+  }
+
+  const numFields = [
+    { k: 'bonus_favorable', l: 'Bonus favorable (pts)' },
+    { k: 'bonus_quartier_concordant', l: 'Bonus quartier concordant' },
+    { k: 'plafond_bonus', l: 'Plafond du bonus' }
+  ]
+
+  return (
+    <div style={{ background: C.card, borderRadius: 12, padding: '16px 20px', border: '1px solid ' + C.purple + '55', marginTop: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ fontFamily: Fh, fontSize: 12, fontWeight: 700, color: C.purple }}>Bonus audience elu (contingent communal)</div>
+        {isDirecteur && !editing && (
+          <button onClick={() => { setDraft({ ...cfg }); setEditing(true) }} style={{ padding: '6px 14px', background: C.purple, color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontFamily: Fh, fontSize: 11, fontWeight: 700 }}>Regler</button>
+        )}
+        {isDirecteur && editing && (
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={() => { setEditing(false); setDraft({ ...cfg }) }} style={{ padding: '6px 12px', border: '1px solid ' + C.border, borderRadius: 7, background: 'transparent', cursor: 'pointer', fontFamily: Fh, fontSize: 11, fontWeight: 600, color: C.muted }}>Annuler</button>
+            <button onClick={save} disabled={saving} style={{ padding: '6px 14px', background: C.accent, color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontFamily: Fh, fontSize: 11, fontWeight: 700 }}>{saving ? '...' : 'Enregistrer'}</button>
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, marginBottom: 14 }}>
+        Un candidat recu en audience par un elu avec avis <b>favorable</b> beneficie d un bonus <b>plafonne</b>,
+        applique uniquement sur les logements du contingent communal (Ville). Le bonus est <b>trace</b> dans le detail
+        du score et l audit. Il n ecrase jamais l eligibilite ni les criteres reglementaires de la CAL.
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12 }}>
+        {numFields.map(f => (
+          <div key={f.k}>
+            <div style={{ fontSize: 10.5, color: C.muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>{f.l}</div>
+            {editing ? (
+              <input type="number" min="0" style={{ ...inp, padding: '6px 8px' }} value={draft[f.k]} onChange={e => setDraft(p => ({ ...p, [f.k]: e.target.value }))} />
+            ) : (
+              <div style={{ fontFamily: Fh, fontSize: 20, fontWeight: 800, color: C.purple }}>{v[f.k]}</div>
+            )}
+          </div>
+        ))}
+        <div>
+          <div style={{ fontSize: 10.5, color: C.muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Contingent communal uniquement</div>
+          {editing ? (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.text, marginTop: 4 }}>
+              <input type="checkbox" checked={!!draft.exiger_contingent_communal} onChange={e => setDraft(p => ({ ...p, exiger_contingent_communal: e.target.checked }))} /> Oui
+            </label>
+          ) : (
+            <div style={{ fontFamily: Fh, fontSize: 16, fontWeight: 700, color: v.exiger_contingent_communal ? C.green : C.amber }}>{v.exiger_contingent_communal ? 'Oui' : 'Non'}</div>
+          )}
+        </div>
+        <div>
+          <div style={{ fontSize: 10.5, color: C.muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Statut</div>
+          {editing ? (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.text, marginTop: 4 }}>
+              <input type="checkbox" checked={!!draft.actif} onChange={e => setDraft(p => ({ ...p, actif: e.target.checked }))} /> Actif
+            </label>
+          ) : (
+            <div style={{ fontFamily: Fh, fontSize: 16, fontWeight: 700, color: v.actif ? C.green : C.red }}>{v.actif ? 'Actif' : 'Desactive'}</div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function ScoringReglesPage({ isDirecteur, toast }) {
   const [rules, setRules] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -1270,6 +1354,8 @@ export function ScoringReglesPage({ isDirecteur, toast }) {
           ))}
         </div>
       </div>
+
+      <AudienceBonusReglage isDirecteur={isDirecteur} toast={toast} />
     </div>
   )
 }

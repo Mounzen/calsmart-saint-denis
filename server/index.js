@@ -1352,7 +1352,26 @@ const TYP = ['T1', 'T2', 'T3', 'T4', 'T5', 'T6']
 const ti = t => TYP.indexOf(t)
 const inRange = (t, mn, mx) => ti(t) >= ti(mn) && ti(t) <= ti(mx)
 
-function computeScore(dem, log, biais) {
+// ============================================================
+// BONUS AUDIENCE ELU - configuration par defaut
+// Reglable par la direction via PUT /api/config/audience
+// (stocke dans referentiels.audience_config).
+// ============================================================
+const AUDIENCE_CONFIG_DEFAULT = {
+  actif: true,                      // activer / desactiver le bonus audience
+  bonus_favorable: 8,               // points pour une audience elu FAVORABLE
+  bonus_quartier_concordant: 2,     // points supplementaires si le quartier vise correspond au logement
+  plafond_bonus: 10,                // plafond du bonus audience (garde-fou anti-derive)
+  exiger_contingent_communal: true  // n appliquer que sur le contingent communal ('Ville')
+}
+
+const clampNum = (v, def, min, max) => {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return def
+  return Math.max(min, Math.min(max, n))
+}
+
+function computeScore(dem, log, biais, ctx) {
   const b = biais || {}
   const excl = []
   if (dem.statut !== 'active') excl.push('Demande non active')
@@ -1412,6 +1431,41 @@ function computeScore(dem, log, biais) {
   else if (hb.nb_refus_non_motives === 1) { malus += 3; bm.push({ type: 'malus', msg: '1 refus non motive (-3)' }) }
   if (hb.nb_presentations >= 3) { bonus += 4; bm.push({ type: 'bonus', msg: '3+ presentations (+4)' }) }
 
+  // ============================================================
+  // BONUS AUDIENCE ELU (contingent communal)
+  // Un candidat recu en audience par un elu avec avis FAVORABLE, sur un logement
+  // du contingent communal ('Ville'), recoit un bonus PLAFONNE et TRACABLE.
+  // Ce bonus ne cree jamais d eligibilite et n ecrase aucun critere reglementaire :
+  // il s ajoute au score dans la limite du plafond, puis le total reste borne a 100.
+  // Regle par la direction (referentiels.audience_config).
+  // ============================================================
+  let audienceBonus = 0
+  const ac = (ctx && ctx.audienceCfg) || {}
+  if (ac.actif !== false && ctx && Array.isArray(ctx.audiencesDem) && ctx.audiencesDem.length) {
+    const favs = ctx.audiencesDem.filter(a => a && a.favorable)
+    if (favs.length) {
+      const exigerCommunal = ac.exiger_contingent_communal !== false
+      const estCommunal = !!(ctx && ctx.estContingentCommunal)
+      if (!exigerCommunal || estCommunal) {
+        const bonusFav = Number.isFinite(+ac.bonus_favorable) ? +ac.bonus_favorable : 8
+        const bonusQ = Number.isFinite(+ac.bonus_quartier_concordant) ? +ac.bonus_quartier_concordant : 2
+        const plafond = Number.isFinite(+ac.plafond_bonus) ? +ac.plafond_bonus : 10
+        const quartierMatch = favs.some(a =>
+          (a.quartier_souhaite && a.quartier_souhaite === log.quartier) ||
+          (a.quartier_elu && a.quartier_elu === log.quartier)
+        )
+        audienceBonus = Math.max(0, Math.min(bonusFav + (quartierMatch ? bonusQ : 0), plafond))
+        if (audienceBonus > 0) {
+          bonus += audienceBonus
+          bm.push({ type: 'bonus', audience: true, msg: 'Audience elu favorable' + (quartierMatch ? ' + quartier concordant' : '') + ' (contingent communal) (+' + audienceBonus + ')' })
+        }
+      } else {
+        // Audience favorable existante mais logement hors contingent communal : tracee, sans bonus
+        bm.push({ type: 'info', audience: true, msg: 'Audience elu favorable (hors contingent communal - sans bonus)' })
+      }
+    }
+  }
+
   const total = Math.min(Math.max(base + bonus - malus, 0), 100)
 
   // Indice de confiance du score : eleve / moyen / risque
@@ -1442,6 +1496,7 @@ function computeScore(dem, log, biais) {
     total,
     te: te.toFixed(1),
     base,
+    audience_bonus: audienceBonus,
     scores: { typ: sTyp, comp: sComp, taux: sTaux, anc: sAnc, urg: sUrg, loc: sLoc, prio: sPrio, dos: sDos },
     bonus_malus: bm,
     confiance: niveauConfiance,
@@ -1469,9 +1524,18 @@ app.get('/api/matching/:logement_id', requireAuth, async (req, res) => {
   // Mode strict par defaut (on peut desactiver via ?strict=0 pour voir tous les candidats)
   const strictContingent = req.query.strict !== '0' && req.query.strict !== 'false'
 
+  // Audiences elus + config du bonus (charges une seule fois pour toute la boucle)
+  const audiences = await readData('audiences.json')
+  const audienceCfg = { ...AUDIENCE_CONFIG_DEFAULT, ...(ref.audience_config || {}) }
+  // Le logement releve-t-il du contingent communal ? ('Ville', ou description contenant "communal")
+  const cfgContingent = contingentsCfg.find(c => c.nom === logementContingent)
+  const estContingentCommunal = /communal/i.test((cfgContingent && cfgContingent.description) || '') ||
+    /^ville$/i.test(String(logementContingent || ''))
+
   const actifs = demandeurs.filter(d => d.statut === 'active')
   const results = actifs.map(dem => {
-    const scoring = computeScore(dem, log, biais)
+    const audiencesDem = audiences.filter(a => a.dem_id === dem.id)
+    const scoring = computeScore(dem, log, biais, { audiencesDem, audienceCfg, estContingentCommunal })
     const eligiblesDem = computeContingentsEligibles(dem, contingentsCfg)
     const matchContingent = eligiblesDem.includes(logementContingent)
     return { dem, res: scoring, contingents_eligibles: eligiblesDem, match_contingent: matchContingent }
@@ -1489,8 +1553,6 @@ app.get('/api/matching/:logement_id', requireAuth, async (req, res) => {
     .sort((a, b) => b.res.total - a.res.total)
 
   const ineligible = results.filter(x => !x.res.eligible)
-
-  const audiences = await readData('audiences.json')
 
   await addLog(req.user, 'MATCHING', 'Logement ' + log.ref + ' [' + logementContingent + '] - ' + conforme.length + ' eligibles conformes')
 
@@ -2093,7 +2155,8 @@ const DEFAULT_SCORING_RULES = {
     { id: 'jamais_presente', label: 'Jamais presente en CAL', effet: '+5', desc: 'Donne une chance aux dossiers jamais proposes.' },
     { id: 'proposition_recente', label: 'Proposition recente', effet: '-5', desc: 'Moins de 2 mois depuis la derniere proposition.' },
     { id: 'refus_repetes', label: 'Refus non motives', effet: '-3 a -8', desc: '1 refus = -3, 2 refus et + = -8.' },
-    { id: 'passages_multiples', label: 'Presente plusieurs fois', effet: '+4', desc: 'Plus de 3 presentations sans attribution.' }
+    { id: 'passages_multiples', label: 'Presente plusieurs fois', effet: '+4', desc: 'Plus de 3 presentations sans attribution.' },
+    { id: 'audience_elu', label: 'Audience elu favorable (contingent communal)', effet: '+8', desc: 'Candidat recu en audience par un elu avec avis favorable, sur un logement du contingent communal. Bonus plafonne, trace et reglable par la direction.' }
   ]
 }
 
@@ -2113,6 +2176,31 @@ app.put('/api/scoring-rules', requireAuth, requireRole('directeur'), async (req,
     [{ champ: 'rules', label: 'Regles de scoring', avant: 'version precedente', apres: 'nouvelle version' }],
     __motif || '')
   res.json(ref.scoring_rules)
+})
+
+// ============================================================
+// CONFIG BONUS AUDIENCE ELU (lecture: tous / reglage: directeur)
+// ============================================================
+app.get('/api/config/audience', requireAuth, async (req, res) => {
+  const ref = await readObj('referentiels.json', {})
+  res.json({ ...AUDIENCE_CONFIG_DEFAULT, ...(ref.audience_config || {}) })
+})
+
+app.put('/api/config/audience', requireAuth, requireRole('directeur'), async (req, res) => {
+  const ref = await readObj('referentiels.json', {})
+  const prev = { ...AUDIENCE_CONFIG_DEFAULT, ...(ref.audience_config || {}) }
+  const body = req.body || {}
+  const next = {
+    actif: body.actif !== undefined ? !!body.actif : prev.actif,
+    bonus_favorable: clampNum(body.bonus_favorable, prev.bonus_favorable, 0, 30),
+    bonus_quartier_concordant: clampNum(body.bonus_quartier_concordant, prev.bonus_quartier_concordant, 0, 15),
+    plafond_bonus: clampNum(body.plafond_bonus, prev.plafond_bonus, 0, 30),
+    exiger_contingent_communal: body.exiger_contingent_communal !== undefined ? !!body.exiger_contingent_communal : prev.exiger_contingent_communal
+  }
+  ref.audience_config = next
+  await writeData('referentiels.json', ref)
+  await addLog(req.user, 'UPDATE_AUDIENCE_CONFIG', JSON.stringify(next))
+  res.json(next)
 })
 
 // ============================================================

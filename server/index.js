@@ -2204,6 +2204,80 @@ app.put('/api/config/audience', requireAuth, requireRole('directeur'), async (re
 })
 
 // ============================================================
+// CANDIDATS MAIRIE : vue d'ensemble
+// Pour chaque logement en proposition, les candidats issus des audiences elus
+// qui sont eligibles et peuvent etre positionnes, classes par score.
+// Contingent Ville => proposition directe ; sinon => plaidoyer CAL.
+// ============================================================
+app.get('/api/candidats-mairie', requireAuth, requireRole('agent', 'directeur'), async (req, res) => {
+  const logements = await readData('logements.json')
+  const demandeurs = await readData('demandeurs.json')
+  const audiences = await readData('audiences.json')
+  const ref = await readObj('referentiels.json', {})
+  const elus = ref.elus || []
+  const biais = ref.historique_biais || {}
+  const audienceCfg = { ...AUDIENCE_CONFIG_DEFAULT, ...(ref.audience_config || {}) }
+  const contingentsCfg = Array.isArray(ref.contingents_config) && ref.contingents_config.length
+    ? ref.contingents_config : CONTINGENTS_CONFIG_974
+
+  const PRIO_TAGS = [['dalo', 'DALO'], ['violences', 'VIF'], ['sans_log', 'SDF'], ['expulsion', 'Expulsion'],
+    ['handicap', 'Handicap'], ['suroc', 'Suroccup.'], ['grossesse', 'Grossesse'], ['urgence', 'Urgence'],
+    ['mutation', 'Mutation'], ['prio_handicap', 'Prio handicap'], ['prio_expulsion', 'Prio expulsion']]
+
+  // candidats mairie = demandeurs ayant au moins une audience
+  const audByDem = {}
+  for (const a of audiences) { (audByDem[a.dem_id] = audByDem[a.dem_id] || []).push(a) }
+
+  const positionnables = new Set()
+  const out = logements.map(log => {
+    const contingent = log.contingent || 'Bailleur'
+    const cfgEntry = contingentsCfg.find(c => c.nom === contingent)
+    const estCommunal = /communal/i.test((cfgEntry && cfgEntry.description) || '') || /^ville$/i.test(String(contingent))
+    const cands = []
+    for (const demId of Object.keys(audByDem)) {
+      const dem = demandeurs.find(d => d.id === demId)
+      if (!dem) continue
+      const audiencesDem = audByDem[demId]
+      const sc = computeScore(dem, log, biais, { audiencesDem, audienceCfg, estContingentCommunal: estCommunal })
+      if (!sc.eligible) continue
+      const favAud = audiencesDem.find(a => a.favorable) || audiencesDem[0]
+      const elu = elus.find(e => e.id === (favAud && favAud.elu_id))
+      positionnables.add(demId)
+      cands.push({
+        dem_id: dem.id, nom: dem.nom, prenom: dem.prenom, compo: dem.compo || '',
+        rev: dem.rev, total: sc.total, te: sc.te, audience_bonus: sc.audience_bonus || 0,
+        favorable: audiencesDem.some(a => a.favorable),
+        elu: elu ? elu.nom : (favAud ? favAud.elu_id : ''),
+        objet: favAud ? (favAud.objet || '') : '',
+        priorites: PRIO_TAGS.filter(([k]) => dem[k]).map(([, lab]) => lab)
+      })
+    }
+    cands.sort((a, b) => b.total - a.total)
+    return {
+      logement: { id: log.id, ref: log.ref, typ: log.typ, loyer: log.loyer, quartier: log.quartier,
+        secteur: log.secteur, adresse: log.adresse, bailleur: log.bailleur, contingent, dispo: log.dispo },
+      est_communal: estCommunal,
+      levier: estCommunal ? 'Proposition directe' : 'Plaidoyer CAL',
+      candidats: cands
+    }
+  })
+
+  // contingent Ville en premier, puis logements avec le plus de candidats
+  out.sort((a, b) => (a.est_communal === b.est_communal ? b.candidats.length - a.candidats.length : (a.est_communal ? -1 : 1)))
+
+  await addLog(req.user, 'CANDIDATS_MAIRIE', out.length + ' logements analyses')
+  res.json({
+    logements: out,
+    stats: {
+      nb_logements: logements.length,
+      nb_ville: out.filter(r => r.est_communal).length,
+      nb_candidats_mairie: Object.keys(audByDem).length,
+      nb_positionnables: positionnables.size
+    }
+  })
+})
+
+// ============================================================
 // AGENDA / CALENDRIER : CAL, audiences, evenements
 // ============================================================
 

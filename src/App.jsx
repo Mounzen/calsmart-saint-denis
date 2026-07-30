@@ -613,6 +613,7 @@ function Sidebar({ active, setActive, badge, onLogout, onChangePwd, onDemo, isDe
       id: 'commission', label: 'Commission CAL', ico: 'cal',
       items: [
         { id: 'matching', ico: 'matching', label: 'Matching', roles: ['agent', 'directeur'] },
+        { id: 'candidats-mairie', ico: 'matching', label: 'Candidats Mairie', roles: ['agent', 'directeur'] },
         { id: 'cal', ico: 'cal', label: 'Prépa CAL', roles: ['agent', 'directeur'] },
         { id: 'decision-cal', ico: 'cal', label: 'Mode Décision CAL', roles: ['agent', 'directeur'] },
         { id: 'calendrier', ico: 'calendrier', label: 'Calendrier CAL', roles: ['agent', 'directeur'] },
@@ -2511,6 +2512,122 @@ function SignaturePVModal({ decision, onClose, onSigned }) {
 }
 
 // ===========================================================
+// CANDIDATS MAIRIE (vue d'ensemble : logements proposes -> candidats audience)
+// ===========================================================
+
+function CandidatsMairie() {
+  const { data, loading } = useApi('/candidats-mairie')
+  const logements = (data && data.logements) || []
+  const stats = (data && data.stats) || {}
+
+  const exportCSV = () => {
+    const head = ['Logement', 'Typo', 'Loyer', 'Quartier', 'Contingent', 'Levier', 'Rang', 'Candidat', 'Elu', 'Taux_effort_%', 'Score', 'Bonus_audience', 'Priorites']
+    const lignes = [head]
+    logements.forEach(r => {
+      const L = r.logement
+      if (!r.candidats.length) {
+        lignes.push([L.ref, L.typ, L.loyer, L.quartier, L.contingent, r.levier, '', '(aucun candidat eligible)', '', '', '', '', ''])
+      }
+      r.candidats.forEach((c, i) => {
+        lignes.push([L.ref, L.typ, L.loyer, L.quartier, L.contingent, r.levier, i + 1, c.nom + ' ' + c.prenom, c.elu, c.te, c.total, c.audience_bonus, (c.priorites || []).join(' ')])
+      })
+    })
+    const csv = lignes.map(row => row.map(v => {
+      const s = String(v == null ? '' : v)
+      return /[",;\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+    }).join(',')).join('\n')
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = 'candidats-mairie.csv'; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  if (loading) return <Spin />
+
+  return (
+    <div style={{ padding: 28, fontFamily: Fb }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16, gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={{ fontFamily: Fh, fontSize: 22, fontWeight: 800, color: C.text, margin: '0 0 4px', letterSpacing: '-0.03em' }}>Candidats Mairie</h1>
+          <p style={{ color: C.muted, fontSize: 12.5 }}>Candidats issus des audiences elus, positionnables sur les logements en proposition (classes par score)</p>
+        </div>
+        <button onClick={exportCSV} style={{ padding: '10px 18px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>Export CSV</button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+        {[
+          { l: 'Logements proposes', v: stats.nb_logements, c: C.accent },
+          { l: 'dont contingent Ville', v: stats.nb_ville, c: C.green },
+          { l: 'Candidats mairie', v: stats.nb_candidats_mairie, c: C.purple },
+          { l: 'Positionnables', v: stats.nb_positionnables, c: C.navy }
+        ].map((k, i) => (
+          <div key={i} style={{ background: C.card, borderRadius: 11, padding: '13px 18px', border: '1px solid ' + C.border, flex: '1 1 130px' }}>
+            <div style={{ fontSize: 24, fontWeight: 800, color: k.c, fontFamily: Fh }}>{k.v != null ? k.v : '-'}</div>
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{k.l}</div>
+          </div>
+        ))}
+      </div>
+
+      {logements.map(r => {
+        const L = r.logement
+        const comm = r.est_communal
+        return (
+          <div key={L.id} style={{ background: C.card, borderRadius: 12, border: '1px solid ' + C.border, marginBottom: 14, overflow: 'hidden' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1px solid ' + C.border, background: C.bg }}>
+              <div style={{ width: 40, height: 40, borderRadius: 8, background: C.navy, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: Fh, fontWeight: 800, fontSize: 14, flexShrink: 0 }}>{L.typ}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontFamily: Fh, fontWeight: 800, fontSize: 14, color: C.text }}>{L.ref} — {L.quartier}</div>
+                <div style={{ fontSize: 11.5, color: C.muted }}>{L.adresse} · {L.loyer} EUR · {L.bailleur}{L.dispo ? ' · dispo ' + L.dispo : ''}</div>
+              </div>
+              <span style={{ fontSize: 11, fontWeight: 800, padding: '4px 10px', borderRadius: 99, background: comm ? C.greenBg : C.amberBg, color: comm ? C.green : C.amber, whiteSpace: 'nowrap' }}>{L.contingent} · {r.levier}</span>
+            </div>
+            {r.candidats.length === 0 ? (
+              <div style={{ padding: '14px 16px', color: C.muted, fontSize: 12.5 }}>Aucun candidat mairie eligible sur ce logement.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: C.bg }}>
+                    {['#', 'Candidat', 'Elu', 'Taux', 'Score', 'Priorites'].map(h => (
+                      <th key={h} style={{ padding: '8px 12px', textAlign: (h === 'Candidat' || h === 'Priorites') ? 'left' : 'center', fontSize: 10, fontWeight: 700, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {r.candidats.map((c, i) => {
+                    const adq = adequation(c.total)
+                    return (
+                      <tr key={c.dem_id} style={{ borderTop: '1px solid ' + C.border }}>
+                        <td style={{ padding: '9px 12px', textAlign: 'center', fontWeight: 800, fontFamily: Fh, color: i < 4 ? C.accent : C.muted }}>{i + 1}</td>
+                        <td style={{ padding: '9px 12px' }}>
+                          <div style={{ fontWeight: 700, color: C.text, fontFamily: Fh }}>{c.nom} {c.prenom}</div>
+                          <div style={{ fontSize: 11, color: C.muted }}>{c.compo}</div>
+                        </td>
+                        <td style={{ padding: '9px 12px', textAlign: 'center', color: C.purple, fontWeight: 600 }}>{c.elu || '—'}</td>
+                        <td style={{ padding: '9px 12px', textAlign: 'center', fontWeight: 700, color: parseFloat(c.te) <= 30 ? C.green : parseFloat(c.te) <= 40 ? C.amber : C.red }}>{c.te}%</td>
+                        <td style={{ padding: '9px 12px', textAlign: 'center' }}>
+                          <span style={{ fontFamily: Fh, fontWeight: 800, fontSize: 15, color: adq.color }}>{c.total}</span>
+                          {c.audience_bonus > 0 && <div style={{ fontSize: 9.5, color: C.purple, fontWeight: 700 }}>audience +{c.audience_bonus}</div>}
+                        </td>
+                        <td style={{ padding: '9px 12px' }}>
+                          {(c.priorites || []).map((p, j) => <Pill key={j} label={p} color={C.red} bg={C.redBg} />)}
+                          {c.favorable && <Pill label="Audience fav." color={C.purple} bg={C.purpleBg} />}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )
+      })}
+      {logements.length === 0 && <div style={{ padding: 24, textAlign: 'center', color: C.muted }}>Aucun logement en proposition.</div>}
+    </div>
+  )
+}
+
+// ===========================================================
 // AUDIENCES
 // ===========================================================
 
@@ -4174,6 +4291,7 @@ function AppInner() {
           {active === 'logements' && <div style={{ flex: 1, overflowY: 'auto' }}><Logements goMatch={goMatch} /></div>}
           {active === 'demandeurs' && <Demandeurs />}
           {active === 'matching' && <Matching initLog={matchLog} addToCAL={addToCAL} />}
+          {active === 'candidats-mairie' && <div style={{ flex: 1, overflowY: 'auto' }}><CandidatsMairie /></div>}
           {active === 'cal' && <div style={{ flex: 1, overflowY: 'auto' }}><CALPrepa dossiers={calDossiers} user={user} /></div>}
           {active === 'audiences' && <div style={{ flex: 1, overflowY: 'auto' }}><AudiencesElus /></div>}
           {active === 'elus' && <div style={{ flex: 1, overflowY: 'auto' }}><GestionElus /></div>}

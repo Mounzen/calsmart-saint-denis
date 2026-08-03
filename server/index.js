@@ -1379,12 +1379,16 @@ function computeScore(dem, log, biais, ctx) {
   if (dem.pmr && !log.pmr) excl.push('PMR requis non disponible')
   if (dem.rdc && !log.rdc) excl.push('RDC requis non disponible')
 
-  const rev = parseFloat(dem.rev) || 1
+  // Revenu : s'il est INCONNU (absent ou 0), on N'EXCLUT PAS sur le taux d'effort.
+  // Le candidat reste eligible, classe sur les autres criteres, et le taux est
+  // marque "a verifier" (te = null) jusqu'a la saisie du revenu.
+  const revNum = parseFloat(dem.rev)
+  const revConnu = Number.isFinite(revNum) && revNum > 0
   const loyer = parseFloat(log.loyer) || 0
-  const te = loyer / rev * 100
-  if (te > 40) excl.push('Taux effort ' + te.toFixed(0) + '% trop eleve')
+  const te = revConnu ? (loyer / revNum * 100) : null
+  if (revConnu && te > 40) excl.push('Taux effort ' + te.toFixed(0) + '% trop eleve')
 
-  if (excl.length > 0) return { eligible: false, excl, total: 0, te: te.toFixed(1), scores: {}, bonus_malus: [] }
+  if (excl.length > 0) return { eligible: false, excl, total: 0, te: (te === null ? null : te.toFixed(1)), revenu_connu: revConnu, scores: {}, bonus_malus: [] }
 
   const sTyp = log.typ === dem.typ_v ? 20 : 15
   const np = (parseInt(dem.adultes) || 0) + (parseInt(dem.enfants) || 0)
@@ -1394,8 +1398,10 @@ function computeScore(dem, log, biais, ctx) {
   else if (np === idx - 1 || np === idx + 3) sComp = 10
   else if (np === idx + 4) sComp = 5
 
-  let sTaux = 0
-  if (te <= 25) sTaux = 20
+  // Score taux : neutre (10 / 20) quand le revenu est inconnu, precise sinon.
+  let sTaux
+  if (!revConnu) sTaux = 10
+  else if (te <= 25) sTaux = 20
   else if (te <= 30) sTaux = 16
   else if (te <= 35) sTaux = 10
   else sTaux = 5
@@ -1494,7 +1500,8 @@ function computeScore(dem, log, biais, ctx) {
     eligible: true,
     excl: [],
     total,
-    te: te.toFixed(1),
+    te: (te === null ? null : te.toFixed(1)),
+    revenu_connu: revConnu,
     base,
     audience_bonus: audienceBonus,
     scores: { typ: sTyp, comp: sComp, taux: sTaux, anc: sAnc, urg: sUrg, loc: sLoc, prio: sPrio, dos: sDos },

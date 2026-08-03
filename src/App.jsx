@@ -923,6 +923,14 @@ function Logements({ goMatch }) {
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
           <ExportButton entity="logements" />
+          <button onClick={async () => {
+            if (!window.confirm('Supprimer definitivement tous les logements sans loyer (importes vides) ?')) return
+            try { const r = await api('/logements/purge-vides', { method: 'POST' }); reload(); toast((r.supprimes || 0) + ' logement(s) vide(s) supprime(s)', 'success') }
+            catch (e) { toast('Erreur : ' + e.message, 'error') }
+          }}
+            style={{ padding: '10px 16px', background: 'transparent', color: C.red, border: '1px solid ' + C.red, borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>
+            Supprimer les vides
+          </button>
           <button onClick={() => setShowForm(true)}
             style={{ padding: '10px 18px', background: C.accent, color: '#fff', border: 'none', borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>
             + Nouveau logement

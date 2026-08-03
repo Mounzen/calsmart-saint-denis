@@ -1344,6 +1344,18 @@ app.delete('/api/logements/:id', requireAuth, requireRole('agent', 'directeur'),
   res.json({ ok: true })
 })
 
+// Purge des logements "vides" (importes sans loyer, en-tetes non reconnues).
+// Supprime definitivement les logements dont le loyer n'est pas un nombre > 0.
+app.post('/api/logements/purge-vides', requireAuth, requireRole('directeur'), async (req, res) => {
+  const l = await readData('logements.json')
+  const avant = l.length
+  const garde = l.filter(x => parseFloat(x.loyer) > 0)
+  const supprimes = avant - garde.length
+  await writeData('logements.json', garde)
+  await addLog(req.user, 'PURGE_LOGEMENTS_VIDES', supprimes + ' logements sans loyer supprimes')
+  res.json({ supprimes, restants: garde.length })
+})
+
 // ============================================================
 // SCORING
 // ============================================================

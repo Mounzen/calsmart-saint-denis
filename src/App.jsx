@@ -514,6 +514,16 @@ function adequation(score) {
   return { label: 'Faible', color: C.red, bg: C.redBg }
 }
 
+// Affichage du taux d'effort : "a verif." quand le revenu est inconnu (te = null)
+function teAffiche(te) {
+  return (te === null || te === undefined || te === '') ? 'à vérif.' : te + '%'
+}
+function teCouleur(te) {
+  if (te === null || te === undefined || te === '') return C.muted
+  const v = parseFloat(te)
+  return v <= 30 ? C.green : v <= 40 ? C.amber : C.red
+}
+
 // ===========================================================
 // LOGIN SCREEN
 // ===========================================================
@@ -913,6 +923,14 @@ function Logements({ goMatch }) {
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
           <ExportButton entity="logements" />
+          <button onClick={async () => {
+            if (!window.confirm('Supprimer definitivement tous les logements sans loyer (importes vides) ?')) return
+            try { const r = await api('/logements/purge-vides', { method: 'POST' }); reload(); toast((r.supprimes || 0) + ' logement(s) vide(s) supprime(s)', 'success') }
+            catch (e) { toast('Erreur : ' + e.message, 'error') }
+          }}
+            style={{ padding: '10px 16px', background: 'transparent', color: C.red, border: '1px solid ' + C.red, borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>
+            Supprimer les vides
+          </button>
           <button onClick={() => setShowForm(true)}
             style={{ padding: '10px 18px', background: C.accent, color: '#fff', border: 'none', borderRadius: 9, cursor: 'pointer', fontFamily: Fh, fontSize: 12.5, fontWeight: 700 }}>
             + Nouveau logement
@@ -1493,7 +1511,10 @@ function Demandeurs() {
                 { l: 'Composition', v: sel.compo || '---' },
                 { l: 'Typ.', v: (sel.typ_min || '') + '>' + (sel.typ_v || '') + '>' + (sel.typ_max || '') },
                 { l: 'Quartiers', v: (sel.quartiers || []).join(', ') || '---' },
-                { l: 'Revenu', v: (sel.rev || 0).toLocaleString() + ' EUR' }
+                { l: 'Revenu', v: sel.rev ? Number(sel.rev).toLocaleString() + ' EUR' : 'à vérifier' },
+                { l: 'Téléphone', v: sel.telephone || '---' },
+                { l: 'NUD', v: sel.nud || '---' },
+                { l: 'Prioritaire', v: sel.prioritaire ? 'Oui' : '---' }
               ].map((f, i) => (
                 <div key={i} style={{ background: C.card, borderRadius: 9, padding: '10px 14px', border: '1px solid ' + C.border, flex: '1 1 120px' }}>
                   <div style={{ fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700 }}>{f.l}</div>
@@ -1843,7 +1864,7 @@ function Matching({ initLog, addToCAL }) {
                     {x.res.base !== x.res.total && <div style={{ fontSize: 9, color: C.muted }}>base {x.res.base}</div>}
                   </div>
                   <div style={{ textAlign: 'center', flexShrink: 0 }}>
-                    <div style={{ fontSize: 15, fontWeight: 700, fontFamily: Fh, color: parseFloat(x.res.te) <= 30 ? C.green : parseFloat(x.res.te) <= 35 ? C.amber : C.red }}>{x.res.te}%</div>
+                    <div style={{ fontSize: 15, fontWeight: 700, fontFamily: Fh, color: teCouleur(x.res.te) }}>{teAffiche(x.res.te)}</div>
                     <div style={{ fontSize: 10, color: C.muted }}>effort</div>
                   </div>
                   <button onClick={() => setScoreDetail(x)}
@@ -1902,7 +1923,7 @@ function ScoreDetailModal({ candidate, logement, onClose }) {
       details: [
         { label: 'Revenus declares', val: (dem.rev || 0) + ' EUR/mois' },
         { label: 'Loyer du logement', val: (logement && logement.loyer || 0) + ' EUR' },
-        { label: 'Taux d effort', val: res.te + '%', highlight: true },
+        { label: 'Taux d effort', val: teAffiche(res.te), highlight: true },
         { label: 'Bareme', val: 'TE <= 25% : 20 pts - TE <= 30% : 16 pts - TE <= 35% : 10 pts - sinon 5 pts' }
       ]
     },
@@ -2015,7 +2036,7 @@ function ScoreDetailModal({ candidate, logement, onClose }) {
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ color: C.light, fontSize: 11 }}>Taux effort</div>
-          <div style={{ color: '#fff', fontSize: 22, fontWeight: 800, fontFamily: Fh }}>{res.te}%</div>
+          <div style={{ color: '#fff', fontSize: 22, fontWeight: 800, fontFamily: Fh }}>{teAffiche(res.te)}</div>
         </div>
       </div>
 
@@ -2303,7 +2324,7 @@ function CALPrepa({ dossiers, user }) {
                       </td>
                       <td style={{ padding: '9px 12px', color: C.text }}>{c.dem.compo}</td>
                       <td style={{ padding: '9px 12px', fontWeight: 600 }}>{(c.dem.rev || 0).toLocaleString()} EUR</td>
-                      <td style={{ padding: '9px 12px' }}><span style={{ fontWeight: 700, color: parseFloat(c.res.te) <= 30 ? C.green : parseFloat(c.res.te) <= 35 ? C.amber : C.red }}>{c.res.te}%</span></td>
+                      <td style={{ padding: '9px 12px' }}><span style={{ fontWeight: 700, color: teCouleur(c.res.te) }}>{teAffiche(c.res.te)}</span></td>
                       <td style={{ padding: '9px 12px' }}>
                         <span style={{ fontWeight: 800, fontSize: 15, color: adq.color, fontFamily: Fh }}>{c.res.total}</span>
                         {c.res.confiance && (
@@ -2529,7 +2550,7 @@ function CandidatsMairie() {
         lignes.push([L.ref, L.typ, L.loyer, L.quartier, L.contingent, r.levier, '', '(aucun candidat eligible)', '', '', '', '', ''])
       }
       r.candidats.forEach((c, i) => {
-        lignes.push([L.ref, L.typ, L.loyer, L.quartier, L.contingent, r.levier, i + 1, c.nom + ' ' + c.prenom, c.elu, c.te, c.total, c.audience_bonus, (c.priorites || []).join(' ')])
+        lignes.push([L.ref, L.typ, L.loyer, L.quartier, L.contingent, r.levier, i + 1, c.nom + ' ' + c.prenom, c.elu, (c.te == null ? 'a verifier' : c.te), c.total, c.audience_bonus, (c.priorites || []).join(' ')])
       })
     })
     const csv = lignes.map(row => row.map(v => {
@@ -2604,7 +2625,7 @@ function CandidatsMairie() {
                           <div style={{ fontSize: 11, color: C.muted }}>{c.compo}</div>
                         </td>
                         <td style={{ padding: '9px 12px', textAlign: 'center', color: C.purple, fontWeight: 600 }}>{c.elu || '—'}</td>
-                        <td style={{ padding: '9px 12px', textAlign: 'center', fontWeight: 700, color: parseFloat(c.te) <= 30 ? C.green : parseFloat(c.te) <= 40 ? C.amber : C.red }}>{c.te}%</td>
+                        <td style={{ padding: '9px 12px', textAlign: 'center', fontWeight: 700, color: teCouleur(c.te) }}>{teAffiche(c.te)}</td>
                         <td style={{ padding: '9px 12px', textAlign: 'center' }}>
                           <span style={{ fontFamily: Fh, fontWeight: 800, fontSize: 15, color: adq.color }}>{c.total}</span>
                           {c.audience_bonus > 0 && <div style={{ fontSize: 9.5, color: C.purple, fontWeight: 700 }}>audience +{c.audience_bonus}</div>}
@@ -4719,7 +4740,7 @@ function DecisionCALPage({ toast, user }) {
                       <div style={{ fontSize: 11, color: C.muted, textTransform: 'uppercase', fontWeight: 700 }}>Rang #{candidat.rang || 1}</div>
                       <div style={{ fontFamily: Fh, fontSize: 18, fontWeight: 800, color: C.text, margin: '4px 0' }}>{candidat.dem.nom} {candidat.dem.prenom}</div>
                       <div style={{ fontSize: 12, color: C.muted }}>
-                        NUD {candidat.dem.nud || '-'} · {candidat.dem.adultes || 0} adulte(s), {candidat.dem.enfants || 0} enfant(s) · Revenu {candidat.dem.rev || 0} € · Taux effort <b>{candidat.res.te}%</b>
+                        NUD {candidat.dem.nud || '-'} · {candidat.dem.adultes || 0} adulte(s), {candidat.dem.enfants || 0} enfant(s) · Revenu {candidat.dem.rev || 0} € · Taux effort <b>{teAffiche(candidat.res.te)}</b>
                       </div>
                     </div>
                     <div style={{ textAlign: 'right' }}>

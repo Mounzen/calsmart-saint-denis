@@ -73,7 +73,9 @@ function mapDemandeur(row) {
     rdc: (row['rdc'] || '').toLowerCase() === 'oui',
     urgence: (row['urgence'] || '').toLowerCase() === 'oui',
     suroc: (row['suroccupation'] || row['suroc'] || '').toLowerCase() === 'oui',
-    dalo_date: row['date_dalo'] || ''
+    dalo_date: row['date_dalo'] || '',
+    telephone: row['telephone'] || row['tel'] || '',
+    prioritaire: ['x', 'oui', '1'].includes((row['prioritaire'] || '').toString().trim().toLowerCase())
   }
 }
 
